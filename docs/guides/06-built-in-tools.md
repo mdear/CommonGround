@@ -55,13 +55,79 @@ JINA_KEY="your-jina-api-key"
 
 The system will automatically pick up this key to authenticate with the Jina API.
 
-## 4. Alternative: Custom MCP Tools
+## 4. Custom MCP Servers & Categories
 
-For advanced use cases, you can connect your own custom search and visit tools via the **Meta-Controller Protocol (MCP)**.
+For advanced use cases, you can connect your own custom tools via the **Model Control Protocol (MCP)**. The framework uses a category-based system to group MCP servers for easy inclusion in agent profiles.
 
-1.  **Configure Your Server**: Add your MCP-compatible tool server to `core/mcp.json`.
-2.  **Enable in Profile**: Add the toolset name (which is the server name from `mcp.json`) to the agent's `allowed_toolsets` in its profile.
-3.  **(Optional) Customize Prompts**: You can improve the descriptions the LLM sees for your custom tools by adding overrides in `mcp_prompt_override.yaml`.
+### MCP Server Categories
+
+Servers defined in `core/mcp.json` can be assigned to categories. This allows profiles to include entire categories of servers using special toolset names:
+
+| Category Toolset Name | Matches Servers With | Description |
+|----------------------|---------------------|-------------|
+| `all_mcp_servers` or `*` | All enabled servers | Every enabled MCP server regardless of category |
+| `all_google_related_mcp_servers` | `category: "google_related"` | Google/Gemini ecosystem servers only |
+| `all_user_specified_mcp_servers` | `category: "user_specified"` | User-added domain-specific servers only |
+
+> [!IMPORTANT]
+> **Category matching is STRICT.** Servers without an explicit `category` field in `mcp.json` default to `uncategorized` and will **NOT** be matched by `all_user_specified_mcp_servers` or `all_google_related_mcp_servers`. You must explicitly set the `category` field.
+
+### Adding a New MCP Server
+
+1. **Add your server to `core/mcp.json`:**
+
+```json
+{
+  "mcpServers": {
+    "MyServer": {
+      "transport": "http",
+      "url": "http://localhost:5000/mcp",
+      "enabled": true,
+      "category": "user_specified"
+    }
+  }
+}
+```
+
+2. **Choose the category:**
+   - Use `"user_specified"` for domain-specific servers you want included via `all_user_specified_mcp_servers`
+   - Use `"google_related"` for Google/Gemini ecosystem servers
+   - Omit `category` or set to `"uncategorized"` if you only want the server available by explicit name
+
+3. **Reference in profiles:**
+
+```yaml
+# Option A: Include via category (server must have explicit category set)
+tool_access_policy:
+  allowed_toolsets:
+    - "all_user_specified_mcp_servers"
+
+# Option B: Include by explicit server name (works regardless of category)
+tool_access_policy:
+  allowed_toolsets:
+    - "MyServer"
+```
+
+4. **(Optional) Customize Prompts**: You can improve the descriptions the LLM sees for your custom tools by adding overrides in `mcp_prompt_override.yaml`.
+
+### Disabling Google-Related Services
+
+To disable all Google-related MCP servers (like the Gemini CLI bridge), simply set `"enabled": false` in `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "G": {
+      "transport": "http",
+      "url": "http://localhost:8765/mcp",
+      "enabled": false,
+      "category": "google_related"
+    }
+  }
+}
+```
+
+Profiles using `all_google_related_mcp_servers` will then resolve to an empty list, and agents will use alternative tools (like Jina) instead.
 
 For more details, see the [Advanced Customization](./03-advanced-customization.md) guide.
 

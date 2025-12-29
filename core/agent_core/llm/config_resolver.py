@@ -14,7 +14,7 @@ class LLMConfigResolver:
     def __init__(self, shared_llm_configs: Dict):
         """
         Initializes the resolver.
-        
+
         Args:
             shared_llm_configs (Dict): The LLM configuration store loaded from the loader, with inheritance already resolved.
         """
@@ -33,31 +33,52 @@ class LLMConfigResolver:
             var_name = config_value.get("var")
             if not var_name:
                 raise ValueError(f"'_type: from_env' directive is missing the 'var' key in config: {config_value}")
-            
+
             env_value = os.getenv(var_name)
             if env_value is not None:
                 # Try to convert string "true" / "false" to boolean, "null" to None
                 if env_value.lower() == 'true': return True
                 if env_value.lower() == 'false': return False
                 if env_value.lower() == 'null': return None
+
+                # Try to parse as JSON (for extra_headers and other complex types)
+                if env_value.strip().startswith('{') or env_value.strip().startswith('['):
+                    try:
+                        return json.loads(env_value)
+                    except json.JSONDecodeError:
+                        logger.warning("env_var_json_parse_failed", extra={
+                            "var_name": var_name,
+                            "hint": "Value looks like JSON but failed to parse. Using as string."
+                        })
+
+                # Try to convert numeric strings to int/float
+                try:
+                    # Try int first
+                    if '.' not in env_value and 'e' not in env_value.lower():
+                        return int(env_value)
+                    # Then try float
+                    return float(env_value)
+                except ValueError:
+                    pass  # Not a number, return as string
+
                 return env_value
-            
+
             if "default" in config_value:
                 return config_value["default"]
-            
+
             if config_value.get("required", False):
                 raise ValueError(f"Required environment variable '{var_name}' is not set and no default was provided.")
-            
+
             return None
 
         if directive == "json_from_file":
             path_str = config_value.get("path")
             if not path_str:
                 raise ValueError(f"'_type: json_from_file' directive is missing the 'path' key in config: {config_value}")
-            
+
             if not os.path.exists(path_str):
                  raise FileNotFoundError(f"File specified in 'json_from_file' not found: {path_str}")
-            
+
             with open(path_str, 'r', encoding='utf-8') as f:
                 return json.load(f)
 
@@ -77,9 +98,9 @@ class LLMConfigResolver:
         base_config = get_active_llm_config_by_name(self.shared_llm_configs, llm_config_ref)
         if not base_config:
             raise ValueError(f"LLM Config '{llm_config_ref}' not found or is inactive.")
-        
+
         raw_config = base_config.get("config", {}).copy()
-        
+
         final_params = {}
         for key, value in raw_config.items():
             try:
@@ -90,7 +111,7 @@ class LLMConfigResolver:
                 logger.error("config_key_resolution_error", extra={"key": key, "llm_config_ref": llm_config_ref, "error_message": str(e)})
                 # Depending on requirements, one can choose to throw an exception here or continue, leaving the configuration incomplete
                 raise e
-        
+
         if "litellm_options" in final_params:
             options = final_params.pop("litellm_options")
             if isinstance(options, dict):

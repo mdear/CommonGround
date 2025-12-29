@@ -1,5 +1,5 @@
 protocol_name: principal_to_associate_briefing
-version: 2.1
+version: 2.3
 description: "Defines the context handover from Principal to an Associate Agent for a specific work module."
 
 # 1. context_parameters: Defines the parameters to be filled directly by the parent Agent's (Principal) LLM
@@ -21,6 +21,25 @@ context_parameters:
       type: array
       description: "A list of other module IDs whose message history should be inherited as context."
       items: { "type": "string" }
+    summarization_budget_chars:
+      type: integer
+      x-handover-title: "Summarization Budget (Characters)"
+      description: |
+        The maximum character budget for this associate's final deliverable summary.
+        - If null or 0: No summarization required - return full detailed findings.
+        - If set to a positive value: Associate should intelligently summarize findings to fit within this budget,
+          prioritizing information most pertinent to the assignment while summarizing less critical details.
+        The Principal calculates this based on: (available_context_budget / num_parallel_assignments).
+        This enables adaptive summarization - the associate can decide what details to keep verbatim vs. summarize.
+    # Internal parameters set by DispatcherNode for budget-aware content inheritance
+    _preselected_inherited_messages:
+      type: array
+      x-internal: true
+      description: "Pre-selected inherited messages within budget (set by DispatcherNode, not LLM)"
+    _preselection_metadata:
+      type: object
+      x-internal: true
+      description: "Metadata about content pre-selection (strategies used, budget info)"
   required: ["module_id_to_assign", "assignment_specific_instructions", "shared_context_for_all_assignments"]
 
 # 2. inheritance: Defines the data that HandoverService needs to extract from the parent Agent's (Principal) context
@@ -41,13 +60,26 @@ inheritance:
     x-handover-title: "Complete Rework/Iteration History"
     condition: "v['state.current_action.parameters.module_id_to_assign'] and len((v['team.work_modules.' + v['state.current_action.parameters.module_id_to_assign'] + '.context_archive'] or [])) > 0"
 
+  # NEW (v2.3): Budget-aware pre-selected content - PREFERRED when available
+  # DispatcherNode pre-selects content within budget before calling HandoverService
+  - from_source:
+      path: "state.current_action.parameters._preselected_inherited_messages"
+    as_payload_key: "inherited_messages"
+    x-handover-title: "Inherited Context (Budget-Limited)"
+    condition: "v['state.current_action.parameters._preselected_inherited_messages']"
+    schema:
+      x-note: "Content pre-selected by DispatcherNode using two-tier strategy (LLM summary or newest-first messages)"
+
+  # FALLBACK (legacy): Raw message iteration - only used when pre-selection is NOT available
+  # This preserves backward compatibility but may cause budget issues
   - from_source:
       path_to_iterate: "team.work_modules.{{ module_id }}.context_archive[-1].messages"
       iterate_on:
         module_id: "state.current_action.parameters.inherit_messages_from"
     as_payload_key: "inherited_messages"
-    x-handover-title: "Inherited Messages from Other Modules"
-    condition: "v['state.current_action.parameters.inherit_messages_from']"
+    x-handover-title: "Inherited Messages from Other Modules (Legacy Fallback)"
+    # Only use this rule if inherit_messages_from is set AND no pre-selected content exists
+    condition: "v['state.current_action.parameters.inherit_messages_from'] and not v['state.current_action.parameters._preselected_inherited_messages']"
 
 # 3. target_inbox_item: Defines the metadata of the finally generated InboxItem
 target_inbox_item:

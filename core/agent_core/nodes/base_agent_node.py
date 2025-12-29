@@ -9,6 +9,14 @@ from datetime import datetime, timezone
 from pocketflow import AsyncNode
 from ..llm.call_llm import estimate_prompt_tokens, call_litellm_acompletion
 from ..framework.tool_registry import get_tool_by_name, get_tools_for_profile, format_tools_for_prompt_by_toolset
+from ..framework.context_budget_guardian import (
+    ContextBudgetGuardian,
+    ContextBudgetStatus,
+    assess_context_budget,
+    generate_context_budget_directive,
+    should_force_tool_call,
+    synthesize_partial_results
+)
 import json_repair
 import os
 from typing import Dict, Any, Optional, List
@@ -50,12 +58,13 @@ class AgentNode(AsyncNode):
         super().__init__(max_retries=kwargs.pop('max_retries', 2), wait=kwargs.pop('wait', 3), **kwargs)
 
         self.profile_id = profile_id
-        self.agent_id = agent_id_override or profile_id 
+        self.agent_id = agent_id_override or profile_id
         agent_id_var.set(self.agent_id)  # Set context variable
         self.profile_instance_id_override = profile_instance_id_override
         self.parent_agent_id = parent_agent_id
-        
+
         self.loaded_profile: Optional[Dict] = None
+        self.context_budget_guardian: Optional[ContextBudgetGuardian] = None  # Initialized after LLM config is resolved
 
         if not shared_for_init:
             raise ValueError(f"AgentNode '{self.agent_id}': 'shared_for_init' (SubContext object) must be provided to __init__ for profile loading.")
@@ -65,7 +74,7 @@ class AgentNode(AsyncNode):
         shared_for_init["state"]["agent_start_utc_timestamp"] = datetime.now(timezone.utc).isoformat()
         shared_for_init["state"]["parent_agent_id"] = self.parent_agent_id
         shared_for_init["state"]["agent_id"] = self.agent_id
-        
+
         if "meta" not in shared_for_init: shared_for_init["meta"] = {}
         shared_for_init["meta"]["agent_id"] = self.agent_id
         shared_for_init["meta"]["parent_agent_id"] = self.parent_agent_id
@@ -84,7 +93,7 @@ class AgentNode(AsyncNode):
         Raises ValueError if the profile (including fallback) is not found.
         """
         agent_profiles_store = context['refs']['run']['config'].get("agent_profiles_store", {})
-        
+
         loaded_successfully = False
         if self.profile_instance_id_override:
             logger.debug("profile_load_by_instance_id_attempt", extra={"agent_id": self.agent_id, "profile_instance_id_override": self.profile_instance_id_override})
@@ -114,7 +123,7 @@ class AgentNode(AsyncNode):
                     available_profiles_summary.append(f"  - Name: {prof_data.get('name', 'N/A')}, InstanceID: {inst_id}, Active: {prof_data.get('is_active')}, Deleted: {prof_data.get('is_deleted')}, Rev: {prof_data.get('rev')}")
                 logger.error("profile_load_critical_failure", extra={"agent_id": self.agent_id, "profile_instance_id_override": self.profile_instance_id_override, "profile_id": self.profile_id, "fallback_logical_name": fallback_logical_name, "available_profiles": available_profiles_summary}, exc_info=True)
                 raise ValueError(f"AgentProfile not found for agent '{self.agent_id}' (tried instance_id '{self.profile_instance_id_override}', name '{self.profile_id}', fallback '{fallback_logical_name}').")
-        
+
         if self.profile_instance_id_override and self.loaded_profile and self.loaded_profile.get('name') != self.profile_id:
             original_profile_id_param = self.profile_id
             loaded_profile_actual_name = self.loaded_profile.get('name')
@@ -131,17 +140,17 @@ class AgentNode(AsyncNode):
                 if msg.get("id") == placeholder_message_id:
                     message_to_update = msg
                     break
-        
+
         if message_to_update:
             message_to_update["content"] = llm_response.get("content") or ""
             if llm_response.get("reasoning"):
                 message_to_update["reasoning_content"] = llm_response.get("reasoning")
             if llm_response.get("tool_calls"):
                 message_to_update["tool_calls"] = llm_response.get("tool_calls")
-            
+
             message_to_update["timestamp"] = datetime.now(timezone.utc).isoformat()
             message_to_update['turn_id'] = state.get("current_turn_id")
-            
+
             logger.debug("placeholder_message_updated", extra={"agent_id": self.agent_id, "placeholder_message_id": placeholder_message_id})
         else:
             logger.warning("placeholder_message_not_found", extra={"agent_id": self.agent_id, "placeholder_message_id": placeholder_message_id})
@@ -168,7 +177,7 @@ class AgentNode(AsyncNode):
             observer_id = config.get("id", "unnamed_observer")
             try:
                 condition_str = config.get("condition", "True")
-                
+
                 # Evaluate condition
                 should_run = False
                 if condition_str == "True":
@@ -195,18 +204,18 @@ class AgentNode(AsyncNode):
                     if action_type == "add_to_inbox":
                         target_agent_id = action_config.get("target_agent_id", "self")
                         inbox_item_template = action_config.get("inbox_item", {})
-                        
+
                         # Basic validation
                         if not inbox_item_template.get("source"):
                             raise ValueError("Observer action 'add_to_inbox' requires 'inbox_item.source'")
 
                         raw_payload = inbox_item_template.get("payload", {})
                         resolved_payload = raw_payload
-                        
+
                         if isinstance(raw_payload, str) and raw_payload.strip().startswith('{{') and raw_payload.strip().endswith('}}'):
                             path_to_resolve = raw_payload.strip('{} ')
                             actual_data = get_nested_value_from_context(context, path_to_resolve)
-                            
+
                             if actual_data is not None:
                                 resolved_payload = actual_data
                             else:
@@ -223,7 +232,7 @@ class AgentNode(AsyncNode):
                                 "triggering_observer_id": observer_id,
                             }
                         }
-                        
+
                         # This is a simplified version. A real implementation would need to handle target_agent_id properly.
                         # For now, we assume "self".
                         state.setdefault("inbox", []).append(new_item)
@@ -266,7 +275,7 @@ class AgentNode(AsyncNode):
         prompt_config = self.loaded_profile.get("system_prompt_construction", {})
         segments = prompt_config.get("system_prompt_segments", [])
         text_definitions = self.loaded_profile.get("text_definitions", {})
-        
+
         prompt_parts = []
         construction_log = []
 
@@ -300,17 +309,17 @@ class AgentNode(AsyncNode):
                 try:
                     if segment_type == "static_text":
                         rendered_content = text_definitions.get(segment.get("content_key"), segment.get("content", ""))
-                    
+
                     elif segment_type == "state_value":
                         source_path = segment.get("source_state_path")
                         ingestor_id = segment.get("ingestor_id")
-                        
+
                         if not source_path:
                             logger.warning("system_prompt_missing_source_path", extra={"segment_id": segment_id, "type": "state_value"})
                             rendered_content = ""
                         else:
                             raw_value = get_nested_value_from_context(context, source_path)
-                            
+
                             if ingestor_id and ingestor_id in INGESTOR_REGISTRY:
                                 ingestor_func = INGESTOR_REGISTRY[ingestor_id]
                                 ingestor_params = segment.get("ingestor_params", {})
@@ -333,7 +342,7 @@ class AgentNode(AsyncNode):
 
                     if isinstance(rendered_content, str):
                         rendered_content = _apply_simple_template_interpolation(rendered_content, context)
-                        
+
                 except Exception as e:
                     logger.error("system_prompt_segment_error", extra={"segment_id": segment_id, "segment_type": segment_type, "error_message": str(e)}, exc_info=True)
                     # Inject an error message into the prompt if a segment fails.
@@ -350,7 +359,7 @@ class AgentNode(AsyncNode):
                     )
 
             prompt_parts.append(rendered_content)
-            
+
             construction_log.append({
                 "segment_id": segment_id,
                 "order": segment.get("order", 99),
@@ -360,14 +369,14 @@ class AgentNode(AsyncNode):
             })
 
         final_prompt = "\n\n".join(filter(None, prompt_parts))
-        
+
         return {
             "final_prompt": final_prompt,
             "construction_log": construction_log,
         }
 
     def _process_tool_calls(self, llm_response: Dict, context: Dict):
-        state = context["state"]        
+        state = context["state"]
         turn_manager = context['refs']['run']['runtime'].get('turn_manager')
 
         tool_calls = llm_response.get("tool_calls")
@@ -377,13 +386,13 @@ class AgentNode(AsyncNode):
             tool_name = tool_call_to_process.get("function", {}).get("name")
             tool_arguments_str = tool_call_to_process.get("function", {}).get("arguments", "{}")
             tool_call_id = tool_call_to_process.get("id")
-            
+
             # Step 1: Validate if the tool exists
             tool_info = get_tool_by_name(tool_name)
             if not tool_info:
                 error_msg = f"LLM called an unregistered tool: '{tool_name}'."
                 logger.error("tool_not_registered", extra={"agent_id": self.agent_id, "tool_name": tool_name, "tool_call_id": tool_call_id}, exc_info=True)
-                
+
                 # Step 1a: Record this failed attempt in the Turn
                 if turn_manager:
                     turn_manager.record_failed_tool_interaction(context, tool_call_to_process, error_msg)
@@ -398,7 +407,7 @@ class AgentNode(AsyncNode):
                 })
                 state["current_action"] = None # Clear action
                 return # Return early
-            
+
             # Normal flow: Only proceed to parse arguments and create a 'running' interaction if the tool is valid.
             try:
                 arguments = json_repair.loads(tool_arguments_str)
@@ -407,7 +416,7 @@ class AgentNode(AsyncNode):
             except Exception as e:
                 error_msg = f"LLM provided invalid JSON arguments for tool '{tool_name}': {e}. Arguments string: '{tool_arguments_str}'"
                 logger.error("tool_arguments_invalid", extra={"agent_id": self.agent_id, "tool_name": tool_name, "tool_call_id": tool_call_id, "arguments_string": tool_arguments_str, "error_message": str(e)}, exc_info=True)
-                
+
                 if turn_manager:
                     turn_manager.record_failed_tool_interaction(context, tool_call_to_process, error_msg)
 
@@ -449,7 +458,7 @@ class AgentNode(AsyncNode):
         (V2) Determines the next action based on a list of rules in the profile's 'flow_decider'.
         """
         state = context["state"]
-        
+
         # Fallback to old mechanism if flow_decider is not defined
         if "flow_decider" not in self.loaded_profile:
             logger.warning("flow_decider_not_found", extra={"agent_id": self.agent_id})
@@ -459,7 +468,7 @@ class AgentNode(AsyncNode):
         for rule in rules:
             rule_id = rule.get("id", "unnamed_rule")
             condition_str = rule.get("condition", "False")
-            
+
             try:
                 eval_globals = {
                     "v": VModelAccessor(context),
@@ -473,8 +482,14 @@ class AgentNode(AsyncNode):
                     action_type = action_config["type"]
 
                     if action_type == "continue_with_tool":
-                        return state.get("current_action", {}).get("tool_name")
-                    
+                        current_action = state.get("current_action", {})
+                        # Handle both dict and string formats (defensive)
+                        if isinstance(current_action, dict):
+                            return current_action.get("tool_name")
+                        elif isinstance(current_action, str):
+                            return current_action
+                        return None
+
                     elif action_type == "end_agent_turn":
                         # This action signals the flow should end.
                         # We can store the outcome in the state for the finalizer.
@@ -490,7 +505,7 @@ class AgentNode(AsyncNode):
                         if not payload.get("content_key"):
                             logger.error("flow_decider_missing_content_key", extra={"rule_id": rule_id}, exc_info=True)
                             continue
-            
+
                         state.setdefault("inbox", []).append({
                             "item_id": f"inbox_{rule_id}_{uuid.uuid4().hex[:4]}",
                             "source": "SELF_REFLECTION_PROMPT",
@@ -499,13 +514,13 @@ class AgentNode(AsyncNode):
                             "metadata": {"created_at": datetime.now(timezone.utc).isoformat(), "triggering_rule_id": rule_id}
                         })
                         return "default"
-        
+
                     elif action_type == "await_user_input":
                         return "await_user_input"
 
                     else:
                         logger.error("flow_decider_unknown_action", extra={"agent_id": self.agent_id, "action_type": action_type, "rule_id": rule_id}, exc_info=True)
-                        
+
             except Exception as e:
                 logger.error("flow_decider_condition_error", extra={"agent_id": self.agent_id, "rule_id": rule_id, "error_message": str(e)}, exc_info=True)
 
@@ -515,16 +530,21 @@ class AgentNode(AsyncNode):
     def _determine_next_action_fallback(self, context: Dict) -> str:
         # This is the old logic, kept for compatibility.
         state = context["state"]
-        if state.get("current_action"):
-            return state["current_action"]["tool_name"]
-        
+        current_action = state.get("current_action")
+        if current_action:
+            # Handle both dict and string formats (defensive)
+            if isinstance(current_action, dict):
+                return current_action.get("tool_name")
+            elif isinstance(current_action, str):
+                return current_action
+
         output_handler_config = self.loaded_profile.get("output_handling_config", {}).get("behavior_parameters_for_default_handler", {})
         action_on_no_tool_call = output_handler_config.get("action_on_no_tool_call", "default")
 
         if action_on_no_tool_call != "default":
              logger.debug("no_tool_call_profile_action", extra={"agent_id": self.agent_id, "action_on_no_tool_call": action_on_no_tool_call})
              return action_on_no_tool_call
-        
+
         logger.debug("no_tool_call_default_loop", extra={"agent_id": self.agent_id})
         return "default"
 
@@ -547,7 +567,7 @@ class AgentNode(AsyncNode):
                 last_assistant_message = messages[i]
                 last_assistant_message_index = i
                 break
-        
+
         if not last_assistant_message or not last_assistant_message.get("tool_calls"):
             return
 
@@ -559,7 +579,7 @@ class AgentNode(AsyncNode):
             if msg.get("role") == "assistant": break
             if msg.get("role") == "tool" and "tool_call_id" in msg:
                 responded_tool_call_ids.add(msg["tool_call_id"])
-        
+
         for item in inbox:
             if item.get("source") == "TOOL_RESULT":
                 payload = item.get("payload", {})
@@ -583,7 +603,7 @@ class AgentNode(AsyncNode):
                     "tool_call_id": tool_call_id,
                     "is_error": True,
                     "content": {
-                        "error": "tool_call_failed", 
+                        "error": "tool_call_failed",
                         "message": "The tool did not produce a response, or its execution was interrupted before a result could be processed. Or, if you haved called more than one tool, the tool call was dropped as this agent only supports one tool call per turn.",
                     }
                 }
@@ -593,7 +613,7 @@ class AgentNode(AsyncNode):
                     "payload": tool_result_payload,
                     "consumption_policy": "consume_on_read",
                     "metadata": {
-                        "created_at": datetime.now(timezone.utc).isoformat(), 
+                        "created_at": datetime.now(timezone.utc).isoformat(),
                         "resolver": "dangling_call_resolver_v2"
                     }
                 })
@@ -608,7 +628,7 @@ class AgentNode(AsyncNode):
             context["loaded_profile"] = self.loaded_profile
 
             await self._process_observers('pre_turn', context)
-            
+
             self._resolve_dangling_tool_calls(context)
 
             # --- START: Refactored Inbox Processing ---
@@ -618,16 +638,16 @@ class AgentNode(AsyncNode):
 
             messages_for_llm = processing_result["messages_for_llm"]
             stream_id = f"stream_{self.agent_id}_{uuid.uuid4().hex[:8]}"
-            
+
             turn_id = turn_manager.start_new_turn(context, stream_id)
             turn_id_var.set(turn_id)
-            
+
             system_prompt_details = await self._construct_system_prompt(context)
             system_prompt = system_prompt_details["final_prompt"]
-            
+
             hydrated_messages = await self._hydrate_messages(messages_for_llm)
             logger.debug("messages_hydrated", extra={"agent_id": self.agent_id, "before_count": len(messages_for_llm), "after_count": len(hydrated_messages)})
-            
+
             cleaned_messages = self._clean_messages_for_llm(hydrated_messages)
             logger.debug("messages_cleaned", extra={"agent_id": self.agent_id, "message_count": len(cleaned_messages)})
 
@@ -639,34 +659,85 @@ class AgentNode(AsyncNode):
             # ===============================================================
 
             from ..llm.config_resolver import LLMConfigResolver
-            
+
             resolver = LLMConfigResolver(shared_llm_configs=context['refs']['run']['config'].get("shared_llm_configs_ref", {}))
             final_llm_config = resolver.resolve(self.loaded_profile)
 
             predicted_total_tokens = estimate_prompt_tokens(
                 model=final_llm_config.get("model"),
-                messages=final_messages_for_llm, # <-- Use the sanitized messages
+                messages=final_messages_for_llm,  # <-- Use the sanitized messages
                 system_prompt=system_prompt,
                 llm_config_for_tokenizer=final_llm_config
             )
-            
+
+            # ==================== CONTEXT BUDGET GUARDIAN ====================
+            # Initialize guardian on first turn, then track consumption
+            model_name = final_llm_config.get("model", "unknown")
+            if self.context_budget_guardian is None:
+                agent_type = self.loaded_profile.get("type")  # e.g., "principal", "partner", "associate"
+                self.context_budget_guardian = ContextBudgetGuardian(
+                    model_name=model_name,
+                    llm_config=final_llm_config,
+                    agent_id=self.agent_id,
+                    agent_type=agent_type
+                )
+
+            budget_status, budget_metadata = self.context_budget_guardian.record_turn(predicted_total_tokens)
+
+            # Get directive if budget is constrained
+            budget_directive = self.context_budget_guardian.get_directive(budget_status, budget_metadata)
+
+            # Inject budget directive into system prompt if needed
+            if budget_directive:
+                system_prompt = f"{system_prompt}\n\n{budget_directive}"
+                logger.info("context_budget_directive_injected", extra={
+                    "agent_id": self.agent_id,
+                    "status": budget_status.name,
+                    "utilization_percent": budget_metadata["utilization_percent"]
+                })
+
+            # Store budget status in context for potential use by flow_decider or tools
+            context["state"]["_context_budget"] = {
+                "status": budget_status.name,
+                "utilization_percent": budget_metadata["utilization_percent"],
+                "remaining_tokens": budget_metadata["remaining_tokens"],
+                "force_completion": budget_status in (ContextBudgetStatus.CRITICAL, ContextBudgetStatus.EXCEEDED)
+            }
+
+            # CIRCUIT BREAKER: If EXCEEDED, skip LLM call entirely
+            skip_llm_call = budget_status == ContextBudgetStatus.EXCEEDED
+            if skip_llm_call:
+                logger.warning(
+                    "context_budget_circuit_breaker_triggered",
+                    extra={
+                        "agent_id": self.agent_id,
+                        "status": budget_status.name,
+                        "utilization_percent": budget_metadata["utilization_percent"],
+                        "action": "skipping_llm_call_forcing_summarization"
+                    }
+                )
+            # ===============================================================
+
             api_tools_list = get_formatted_api_tools(self, context)
 
             self.max_retries = final_llm_config.get("max_retries", self.max_retries)
             self.wait = final_llm_config.get("wait_seconds_on_retry", self.wait)
-            
+
             llm_call_package = {
-                "messages_for_llm": final_messages_for_llm, # <-- Use the sanitized messages
+                "messages_for_llm": final_messages_for_llm,  # <-- Use the sanitized messages
                 "system_prompt_content": system_prompt,
                 "final_llm_config": final_llm_config,
                 "api_tools_list": api_tools_list,
                 "stream_id": stream_id,
                 "context_for_exec": context,
-                "predicted_total_tokens": predicted_total_tokens
+                "predicted_total_tokens": predicted_total_tokens,
+                "context_budget_status": budget_status.name,  # Include for downstream use
+                "skip_llm_call": skip_llm_call,  # Circuit breaker flag
+                "agent_type": agent_type  # For circuit breaker tool selection
             }
-            
+
             turn_manager.enrich_turn_inputs(context, turn_id, processing_result, llm_call_package, system_prompt_details)
-            
+
             return llm_call_package
         except Exception as e:
             error_msg = f"Unhandled exception in prep_async: {e}"
@@ -674,7 +745,7 @@ class AgentNode(AsyncNode):
             if turn_manager:
                 turn_manager.fail_current_turn(context, error_msg)
             raise
-    
+
     async def exec_async(self, prep_res: Dict) -> Dict:
         """
         (Modified) Calls the LLM and returns the aggregated result, or a standard error dictionary on failure.
@@ -685,6 +756,80 @@ class AgentNode(AsyncNode):
         events = context['refs']['run']['runtime'].get("event_manager")
         run_id = context['meta'].get("run_id")
         initial_params = flow_specific_state.get("initial_parameters", {})
+
+        # ===============================================================
+        # CIRCUIT BREAKER: Skip LLM call if context budget exceeded
+        # ===============================================================
+        if prep_res.get("skip_llm_call"):
+            logger.warning(
+                "exec_async_skipped_due_to_context_budget",
+                extra={"agent_id": self.agent_id, "run_id": run_id}
+            )
+
+            # Synthesize partial results from completed work
+            team_state = context.get('refs', {}).get('run', {}).get('team_state', {})
+            budget_metadata = context.get('state', {}).get('_context_budget', {})
+
+            synthesis = synthesize_partial_results(
+                team_state=team_state,
+                triggered_agent_id=self.agent_id,
+                budget_metadata=budget_metadata
+            )
+
+            # Return a synthetic response that forces flow completion
+            # Tool selection depends on agent type:
+            # - Principal/Partner: use finish_flow to wrap up the session
+            # - Associates: use generate_message_summary to submit deliverables
+            forced_tool_call_id = f"forced_circuit_breaker_{uuid.uuid4().hex[:8]}"
+            agent_type = prep_res.get("agent_type") or "associate"  # From profile's "type" field
+
+            if agent_type in ("principal", "partner"):
+                # Principal/Partner should gracefully end the flow with synthesis
+                forced_tool_name = "finish_flow"
+                forced_tool_args = {
+                    "reason": f"Context budget exceeded ({budget_metadata.get('utilization_percent', '>70')}% utilization). Circuit breaker triggered.",
+                    "partial_results_synthesis": synthesis.get("user_message", "Partial results not available."),
+                    "completed_modules": synthesis.get("summary", {}).get("completed", 0),
+                    "incomplete_modules": synthesis.get("summary", {}).get("incomplete", 0)
+                }
+            else:
+                # Associates should submit their current findings
+                forced_tool_name = "generate_message_summary"
+                forced_tool_args = {
+                    "reason": f"Context budget exceeded ({budget_metadata.get('utilization_percent', '>70')}% utilization). Circuit breaker triggered.",
+                    "partial_work_summary": synthesis.get("user_message", "Work interrupted due to context limits.")
+                }
+
+            logger.info(
+                "circuit_breaker_tool_selected",
+                extra={
+                    "agent_id": self.agent_id,
+                    "agent_type": agent_type,
+                    "tool_name": forced_tool_name,
+                    "completed_modules": synthesis.get("summary", {}).get("completed", 0),
+                    "incomplete_modules": synthesis.get("summary", {}).get("incomplete", 0)
+                }
+            )
+
+            # Include the synthesis in the response content for user visibility
+            synthesis_content = synthesis.get("user_message", "")
+
+            return {
+                "content": f"[CONTEXT BUDGET EXCEEDED - Automatic {forced_tool_name} triggered]\n\n{synthesis_content}",
+                "tool_calls": [{
+                    "id": forced_tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": forced_tool_name,
+                        "arguments": json.dumps(forced_tool_args)
+                    }
+                }],
+                "reasoning": None,
+                "model_id_used": "circuit_breaker",
+                "error": None,
+                "circuit_breaker_synthesis": synthesis  # Include full synthesis for downstream processing
+            }
+        # ===============================================================
 
         # Create a placeholder message ID
         placeholder_message_id = f"msg_{prep_res['stream_id']}"
@@ -722,9 +867,9 @@ class AgentNode(AsyncNode):
                 contextual_data_for_event=contextual_data_for_event,
                 run_context=context['refs']['run']
             )
-            
+
             aggregated_llm_output['placeholder_message_id'] = placeholder_message_id
-            
+
             turn_manager = context['refs']['run']['runtime'].get('turn_manager')
             if turn_manager:
                 turn_manager.update_llm_interaction_end(context, aggregated_llm_output)
@@ -755,13 +900,13 @@ class AgentNode(AsyncNode):
                 "error": error_msg,
                 "error_type": type(e).__name__,
                 "placeholder_message_id": placeholder_message_id,
-                "actual_usage": None, 
-                "content": None, 
-                "tool_calls": [], 
-                "reasoning": None, 
+                "actual_usage": None,
+                "content": None,
+                "tool_calls": [],
+                "reasoning": None,
                 "model_id_used": None
             }
-    
+
     async def post_async(self, context: Dict, prep_res: Dict, exec_res: Dict) -> str:
         logger.debug("post_async_started", extra={"agent_id": self.agent_id})
         state = context["state"]
@@ -778,7 +923,7 @@ class AgentNode(AsyncNode):
 
                 if turn_manager:
                     turn_manager.fail_current_turn(context, error_message)
-                
+
                 self._update_assistant_message_in_state(state, llm_response)
 
                 if events_for_post:
@@ -787,10 +932,10 @@ class AgentNode(AsyncNode):
                         agent_id=self.agent_id,
                         error_message=f"Agent '{self.agent_id}' encountered a critical error: {error_message}"
                     )
-                
+
                 next_action = "error"
                 return next_action
-            
+
             if turn_manager:
                 turn_manager.update_llm_interaction_end(context, llm_response)
 
@@ -798,13 +943,66 @@ class AgentNode(AsyncNode):
             if isinstance(llm_response.get("tool_calls"), list) and len(llm_response["tool_calls"]) > 1:
                 logger.warning("multiple_tool_calls_detected", extra={"agent_id": self.agent_id, "total_calls": len(llm_response['tool_calls']), "dropped_calls": llm_response['tool_calls'][1:]})
                 llm_response["tool_calls"] = llm_response["tool_calls"][:1]  # Keep only the first call
+
+            # ===============================================================
+            # CONTEXT BUDGET GUARDIAN: Force tool call at EXCEEDED threshold
+            # ===============================================================
+            context_budget = state.get("_context_budget", {})
+            budget_status_name = context_budget.get("status")
+            if budget_status_name:
+                try:
+                    budget_status = ContextBudgetStatus[budget_status_name]
+                    # Get agent_type from profile to select correct forced tool
+                    agent_type = self.loaded_profile.get("type") if self.loaded_profile else None
+                    forced_tool = should_force_tool_call(budget_status, agent_type=agent_type)
+
+                    if forced_tool:
+                        # Check if LLM already called the required tool
+                        current_tool_calls = llm_response.get("tool_calls", [])
+                        already_calling_forced = any(
+                            tc.get("function", {}).get("name") == forced_tool
+                            for tc in current_tool_calls
+                        )
+
+                        if not already_calling_forced:
+                            logger.warning(
+                                "context_budget_forcing_tool_call",
+                                extra={
+                                    "agent_id": self.agent_id,
+                                    "status": budget_status_name,
+                                    "forced_tool": forced_tool,
+                                    "utilization_percent": context_budget.get("utilization_percent")
+                                }
+                            )
+                            # Inject the forced tool call
+                            forced_tool_call = {
+                                "id": f"forced_tc_{uuid.uuid4().hex[:8]}",
+                                "type": "function",
+                                "function": {
+                                    "name": forced_tool,
+                                    "arguments": json.dumps({"reason": "Context budget exceeded - automatic summarization triggered"})
+                                }
+                            }
+                            llm_response["tool_calls"] = [forced_tool_call]
+                            # current_action must be a dict, not a string
+                            state["current_action"] = {
+                                "tool_name": forced_tool,
+                                "tool_call_id": forced_tool_call["id"],
+                                "parameters": {"reason": "Context budget exceeded - automatic summarization triggered"}
+                            }
+                            state["current_tool_call_id"] = forced_tool_call["id"]
+                            state["current_tool_arguments"] = {"reason": "Context budget exceeded - automatic summarization triggered"}
+                except (KeyError, ValueError) as e:
+                    logger.debug("context_budget_status_parse_error", extra={"error": str(e)})
+            # ===============================================================
+
             self._update_assistant_message_in_state(state, llm_response)
             # 2. Execute Post-Turn Observers
             await self._process_observers('post_turn', context)
-            
+
             # 3. Decide the next action based on the Profile
             next_action = self._decide_next_action_with_flow_decider(context)
-            
+
             logger.info("turn_completed", extra={"agent_id": self.agent_id, "next_action": next_action})
             return next_action
         except Exception as e:
@@ -831,21 +1029,21 @@ class AgentNode(AsyncNode):
                         run_id=run_id_for_post,
                         turn_id=current_turn_id,
                         agent_id=self.agent_id
-                    )                
+                    )
                 await trigger_view_model_update(context, "flow_view")
                 await trigger_view_model_update(context, "timeline_view")
                 await trigger_view_model_update(context, "kanban_view")
                 await events_for_post.emit_turns_sync(context)
-    
+
     def _extract_purpose_from_tool_result(self, payload: Dict, context: Dict) -> str:
         """Extract purpose/context from tool result to create unique source_uri."""
         tool_name = payload.get("tool_name", "unknown")
         tool_content = payload.get("content", {})
-        
+
         # Try to get purpose from current action context
         current_action = context.get("state", {}).get("current_action", {})
         agent_profile = self.loaded_profile.get("name", "unknown")
-        
+
         # Generate purpose based on tool type and context
         if tool_name in ["jina_search", "web_search"]:
             if isinstance(tool_content, dict):
@@ -853,7 +1051,7 @@ class AgentNode(AsyncNode):
                 purpose = f"search_{hash(query) % 10000}"  # Hash to keep it short
             else:
                 purpose = "search_results"
-        
+
         elif tool_name == "jina_visit":
             if isinstance(tool_content, dict):
                 url = tool_content.get("url", "")
@@ -870,7 +1068,7 @@ class AgentNode(AsyncNode):
                     purpose = "page_content"
             else:
                 purpose = "page_content"
-                
+
         elif tool_name == "dispatch_submodules":
             # For dispatcher, include some context about the assignment
             if isinstance(tool_content, dict):
@@ -883,16 +1081,16 @@ class AgentNode(AsyncNode):
                     purpose = "dispatch_general"
             else:
                 purpose = "dispatch_result"
-                
+
         elif tool_name == "generate_markdown_report":
             purpose = "final_report"
-            
+
         else:
             # For other tools, use agent profile and tool name
             purpose = f"{agent_profile}_{tool_name}".replace("_", "")[:20]
-        
+
         return purpose
-    
+
     async def _hydrate_messages(self, dehydrated_messages: List[Dict]) -> List[Dict]:
         """
         [Refactored] Simplified message hydration logic, fully delegated to the Knowledge Base (KB).
@@ -912,46 +1110,76 @@ class AgentNode(AsyncNode):
                 logger.error("message_hydration_failed", extra={"agent_id": self.agent_id, "error_message": str(e)}, exc_info=True)
                 # Keep the original (dehydrated) content as a fallback
                 hydrated_msg['content'] = msg.get('content')
-            
+
             hydrated_messages.append(hydrated_msg)
-        
+
         logger.debug("message_hydration_complete", extra={"message_count": len(hydrated_messages)})
         return hydrated_messages
-        
+
     def _clean_messages_for_llm(self, messages: List[Dict]) -> List[Dict]:
         """Cleans messages, removes internal fields, and ensures all content is LLM-processable text."""
+        import json
         cleaned_messages = []
-        
+
         for msg in messages:
             # Create a clean copy of the message
             cleaned_msg = {}
-            
+
             # Keep only the standard fields required by the LLM
             for key in ["role", "content", "tool_calls", "tool_call_id", "name"]:
                 if key in msg:
                     value = msg[key]
-                    
+
                     # Ensure content is a string
                     if key == "content":
                         if isinstance(value, dict):
                             # If content is a dictionary, convert it to a JSON string
-                            import json
                             cleaned_msg[key] = json.dumps(value, ensure_ascii=False)
                             logger.debug("dict_content_converted_to_json", extra={"message_role": msg.get('role')})
                         elif value is None:
                             cleaned_msg[key] = ""  # Prevent None content
                         else:
                             cleaned_msg[key] = str(value)  # Ensure it is a string
+                    elif key == "tool_calls":
+                        # Sanitize tool_calls to ensure arguments are valid JSON objects
+                        # Anthropic requires tool_use.input to be a dictionary, not a string
+                        sanitized_tool_calls = []
+                        for tc in value:
+                            tc_copy = dict(tc)  # Shallow copy
+                            if "function" in tc_copy:
+                                func = dict(tc_copy["function"])  # Copy function dict
+                                args_str = func.get("arguments", "{}")
+                                # Ensure arguments parse to a dict, default to {} if malformed
+                                try:
+                                    parsed_args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                                    if not isinstance(parsed_args, dict):
+                                        logger.warning("tool_call_arguments_sanitized", extra={
+                                            "tool_name": func.get("name"),
+                                            "original_args": args_str,
+                                            "reason": "not_a_dict"
+                                        })
+                                        parsed_args = {}
+                                except (json.JSONDecodeError, TypeError):
+                                    logger.warning("tool_call_arguments_sanitized", extra={
+                                        "tool_name": func.get("name"),
+                                        "original_args": args_str,
+                                        "reason": "json_decode_error"
+                                    })
+                                    parsed_args = {}
+                                func["arguments"] = json.dumps(parsed_args)
+                                tc_copy["function"] = func
+                            sanitized_tool_calls.append(tc_copy)
+                        cleaned_msg[key] = sanitized_tool_calls
                     else:
                         cleaned_msg[key] = value
-            
+
             # Filter out internal fields (those starting with _)
             internal_fields = [k for k in msg.keys() if k.startswith('_')]
             if internal_fields:
                 logger.debug("internal_fields_removed", extra={"internal_fields": internal_fields})
-            
+
             cleaned_messages.append(cleaned_msg)
-        
+
         return cleaned_messages
 
     def _finalize_dangling_tool_in_turn(self, context: Dict):
@@ -961,7 +1189,7 @@ class AgentNode(AsyncNode):
         """
         state = context.get("state", {})
         team_state = context.get("refs", {}).get("team", {})
-        
+
         current_turn_id = state.get("current_turn_id")
         current_tool_call_id = state.get("current_tool_call_id")
 
@@ -971,11 +1199,11 @@ class AgentNode(AsyncNode):
 
         # Find the current Turn
         current_turn = next((t for t in reversed(team_state.get("turns", [])) if t.get("turn_id") == current_turn_id), None)
-        
+
         if current_turn:
             # Find the corresponding tool_interaction in this turn that is still 'running'
             tool_interaction_to_update = next((
-                ti for ti in current_turn.get("tool_interactions", []) 
+                ti for ti in current_turn.get("tool_interactions", [])
                 if ti.get("tool_call_id") == current_tool_call_id and ti.get("status") == "running"
             ), None)
 

@@ -34,6 +34,7 @@ llm_config_ref: "associate_llm"
 tool_access_policy:
   allowed_toolsets:
     - "flow_control_end"
+    - "flow_control_summary"  # Gives all Associates the CHOICE to summarize before returning
 
 
 system_prompt_construction:

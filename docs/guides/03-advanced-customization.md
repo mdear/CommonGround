@@ -38,6 +38,44 @@ inheritance:
 #### 1.4 Managing Context Inheritance
 To prevent context from growing indefinitely and consuming excessive tokens, the framework provides a mechanism to control what gets passed between agents. When inheriting message histories (e.g., `as_payload_key: "inherited_messages"`), the system will automatically filter out any messages that have an internal `_no_handover` flag. This flag is automatically added to messages that are part of an agent's initial briefing, ensuring that an agent doesn't pass its own startup instructions on to the next agent in the chain. This is a key feature for maintaining performance in long-running, multi-agent tasks.
 
+#### 1.5 Budget-Aware Content Inheritance (NEW)
+
+When using `inherit_messages_from` to pass context from completed work modules to new Associates, the system enforces **budget-aware content selection** to prevent context explosion.
+
+**Problem Addressed**: Without limits, inheriting raw message history from multiple modules can cause new agents to be "born over-budget" (e.g., 86% of context used before doing any work).
+
+**Two-Tier Selection Strategy**:
+
+1.  **Tier 1 (Preferred)**: Use `deliverables.primary_summary` from the source module's archive
+    - This is the LLM-generated summary created when the source module finished
+    - Clean, compact, no Knowledge Base tokens to expand
+    - Used if it exists AND fits within the computed budget
+
+2.  **Tier 2 (Fallback)**: Select messages newest-to-oldest from raw history
+    - Used when no summary exists or summary exceeds budget
+    - Messages are **hydrated first** to get accurate size (KB tokens expanded)
+    - Selection stops when budget is exhausted
+    - Individual messages are never truncated
+
+**Budget Computation**:
+```
+per_source_budget = (target_context_limit * 0.40) / num_sources
+```
+- `target_context_limit`: The spawning agent's context window (e.g., 200K tokens)
+- `0.40`: 40% reserved for inherited content (constant: `INHERITANCE_BUDGET_FRACTION`)
+- `num_sources`: Number of modules in `inherit_messages_from`
+
+**Example**:
+```yaml
+# In dispatch_submodules call
+assignments:
+  - module_id_to_assign: "WM_6"
+    inherit_messages_from: ["WM_2", "WM_3"]  # Two sources
+    # Budget: (200K * 0.40) / 2 = 40K tokens = 160K chars per source
+```
+
+**Implementation**: The content selection happens in `dispatcher_node._preselect_inherited_content()` BEFORE the HandoverService is called, ensuring budget compliance at dispatch time.
+
 ## 2. Optimizing External Tools with MCP Prompt Overrides
 
 #### 2.1 Purpose
@@ -56,7 +94,7 @@ Sometimes, the description for a tool discovered from an external MCP server is 
     # mcp_prompt_override.yaml
 
     "G.google_web_search": "Performs a precise academic search on Google. Prioritizes academic databases and well-known journals. Query format: 'keyword site:scholar.google.com'"
-    
+
     "G.web_fetch": "After fetching a web page, extracts the core arguments and data points. Ignores advertisements and navigation links."
     ```
 

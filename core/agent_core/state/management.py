@@ -101,7 +101,7 @@ def create_run_context(
         # The Partner's initial question should also be set in the team_state
         if run_context["team_state"]["question"] is None:
             run_context["team_state"]["question"] = initial_params.get("initial_user_query")
-        
+
         partner_ctx = create_partner_context(run_context_ref=run_context, parent_agent_id=None)
         run_context["sub_context_refs"]["_partner_context_ref"] = partner_ctx
         logger.debug("partner_context_created", extra={"server_run_id": server_run_id})
@@ -115,7 +115,7 @@ def create_run_context(
             if instance_id:
                 resolved_ids.append(instance_id)
         run_context["team_state"]["profiles_list_instance_ids"] = resolved_ids
-        
+
         principal_ctx = create_principal_context(run_context_ref=run_context, parent_agent_id=None)
         run_context["sub_context_refs"]["_principal_context_ref"] = principal_ctx
         logger.debug("principal_context_created", extra={"server_run_id": server_run_id})
@@ -129,7 +129,7 @@ def create_run_context(
 def create_partner_context(run_context_ref: RunContext, parent_agent_id: Optional[str]) -> SubContext:
     """Creates the sub-context for the Partner Agent."""
     agent_id = "Partner"
-    
+
     # 1. Create private state
     partner_state = _create_flow_specific_state_template()
 
@@ -152,17 +152,23 @@ def create_partner_context(run_context_ref: RunContext, parent_agent_id: Optiona
             "team": run_context_ref["team_state"],
         }
     }
-    
+
     # 4. Populate Partner-specific initial state
     # The Partner needs to know all available Profiles to discuss with the user
     all_profiles = run_context_ref["config"]["agent_profiles_store"]
     # Filter based on the available_for_staffing flag
     staffing_available_instance_ids = [
-        inst_id for inst_id, prof in all_profiles.items() 
+        inst_id for inst_id, prof in all_profiles.items()
         if prof.get("is_active") and not prof.get("is_deleted") and prof.get("available_for_staffing") is True
     ]
     partner_state["profiles_list_instance_ids"] = staffing_available_instance_ids
-    
+
+    logger.info("partner_context_profiles_populated", extra={
+        "total_profiles": len(all_profiles),
+        "staffing_available_count": len(staffing_available_instance_ids),
+        "staffing_instance_ids": staffing_available_instance_ids[:5] if staffing_available_instance_ids else []
+    })
+
     # Add the initial question to the message history to provide context for the user's conversation
     initial_query = run_context_ref["team_state"].get("question")
     if initial_query:
@@ -171,13 +177,13 @@ def create_partner_context(run_context_ref: RunContext, parent_agent_id: Optiona
     return partner_context
 
 def create_principal_context(
-    run_context_ref: RunContext, 
+    run_context_ref: RunContext,
     parent_agent_id: Optional[str],
     iteration_mode: str
 ) -> SubContext:
     """Creates the sub-context for the Principal Agent."""
     agent_id = "Principal"
-    
+
     principal_state = _create_flow_specific_state_template()
     principal_state["current_iteration_count"] = 1
 
@@ -195,7 +201,7 @@ def create_principal_context(
             "team": run_context_ref["team_state"],
         }
     }
-    
+
     # Initial query is now handled via Handover Protocol and inbox, not direct injection.
 
     return principal_context
@@ -206,7 +212,7 @@ def validate_context_state(context: SubContext) -> bool:
     This is a sanity check, not strict type validation.
     """
     if not isinstance(context, dict): return False
-    
+
     required_top_keys = {"meta", "state", "runtime_objects", "refs"}
     if not required_top_keys.issubset(context.keys()):
         logger.warning("context_validation_failed_missing_keys", extra={"found_keys": list(context.keys())})
@@ -215,7 +221,7 @@ def validate_context_state(context: SubContext) -> bool:
     if not isinstance(context["refs"], dict) or "run" not in context["refs"] or "team" not in context["refs"]:
         logger.warning("context_validation_failed_refs_malformed")
         return False
-        
+
     if not isinstance(context["state"], dict):
         logger.warning("context_validation_failed_state_not_dict")
         return False
@@ -229,6 +235,50 @@ def update_context_activity(context: SubContext):
     else:
         agent_id = context.get("meta", {}).get("agent_id", "Unknown")
         logger.warning("context_activity_update_failed", extra={"agent_id": agent_id})
+
+
+def _refresh_profile_instance_ids_on_restore(target_context: RunContext):
+    """
+    Refreshes profile instance IDs in restored state to match current server's UUIDs.
+
+    Profile instance IDs (UUIDs) are regenerated on each server restart. When a run is
+    resumed after a restart, the stored `profiles_list_instance_ids` will contain stale
+    UUIDs that no longer exist in the current `agent_profiles_store`. This function
+    recalculates the list of available profiles using the current server's store.
+
+    This affects:
+    - Partner's state.profiles_list_instance_ids (used for displaying available associates)
+    - team_state.profiles_list_instance_ids (used by Principal for team composition)
+    """
+    current_profiles_store = target_context["config"]["agent_profiles_store"]
+
+    # Recalculate staffing-available profile instance IDs from current server's store
+    staffing_available_instance_ids = [
+        inst_id for inst_id, prof in current_profiles_store.items()
+        if prof.get("is_active") and not prof.get("is_deleted") and prof.get("available_for_staffing") is True
+    ]
+
+    old_count = 0
+
+    # Update Partner's state if it exists
+    partner_context = target_context.get("sub_context_refs", {}).get("_partner_context_ref")
+    if partner_context and isinstance(partner_context.get("state"), dict):
+        old_ids = partner_context["state"].get("profiles_list_instance_ids", [])
+        old_count = len(old_ids) if old_ids else 0
+        partner_context["state"]["profiles_list_instance_ids"] = staffing_available_instance_ids
+        logger.info("partner_profiles_refreshed_on_restore", extra={
+            "old_count": old_count,
+            "new_count": len(staffing_available_instance_ids)
+        })
+
+    # Also update team_state if it has profiles_list_instance_ids
+    team_state = target_context.get("team_state", {})
+    if "profiles_list_instance_ids" in team_state:
+        team_state["profiles_list_instance_ids"] = staffing_available_instance_ids
+        logger.info("team_state_profiles_refreshed_on_restore", extra={
+            "new_count": len(staffing_available_instance_ids)
+        })
+
 
 def _inject_restored_state(target_context: RunContext, restored_data: Dict):
     """
@@ -257,7 +307,7 @@ def _inject_restored_state(target_context: RunContext, restored_data: Dict):
     restored_sub_states = restored_data.get("sub_contexts_state", {})
     if isinstance(restored_sub_states, dict):
         for context_key, state_data in restored_sub_states.items():
-            
+
             # Check if the target reference already exists (e.g., Partner Context is pre-created)
             target_sub_context_ref = target_context["sub_context_refs"].get(context_key)
 
@@ -268,11 +318,11 @@ def _inject_restored_state(target_context: RunContext, restored_data: Dict):
                     logger.info("sub_context_state_injected", extra={"context_key": context_key})
                 else:
                     logger.warning("sub_context_state_not_dict", extra={"context_key": context_key})
-            
+
             elif isinstance(state_data, dict):
                 # If the reference does not exist (is None), rebuild the entire SubContext object on-demand
                 logger.info("sub_context_rebuilding_on_demand", extra={"context_key": context_key})
-                
+
                 # Extract metadata from the restored state to build the new meta
                 parent_agent_id = state_data.get("parent_agent_id")
                 # agent_id should be inferred from the key or retrieved from the state
@@ -291,13 +341,19 @@ def _inject_restored_state(target_context: RunContext, restored_data: Dict):
                         "team": target_context["team_state"],
                     }
                 }
-                
+
                 # Place the rebuilt complete SubContext object back into run_context
                 target_context["sub_context_refs"][context_key] = rebuilt_sub_context
                 logger.info("sub_context_rebuilt", extra={"context_key": context_key})
 
             else:
                  logger.warning("sub_context_data_not_dict_cannot_rebuild", extra={"context_key": context_key})
+
+    # 2.5 CRITICAL: Refresh profile instance IDs to match current server's UUIDs
+    # Profile instance IDs are regenerated on each server restart, so restored state
+    # will have stale IDs that don't exist in the current agent_profiles_store.
+    # We must refresh them to ensure the Partner can see available associates.
+    _refresh_profile_instance_ids_on_restore(target_context)
 
     # 3. Subsequent cleanup logic (unchanged)
     # --- Post-injection Cleanup: Finalize any interrupted states from previous session ---
@@ -311,18 +367,18 @@ def _inject_restored_state(target_context: RunContext, restored_data: Dict):
                     turn["status"] = "interrupted"
                     turn["error_details"] = "This action was active when the previous session ended and could not be completed."
                     turn["end_time"] = datetime.now(timezone.utc).isoformat()
-                
+
                 # Deeper check for running LLM interactions within the turn
                 llm_interaction = turn.get("llm_interaction")
                 if llm_interaction and llm_interaction.get("status") == "running":
                     llm_interaction["status"] = "error"
                     llm_interaction.setdefault("error", {})["message"] = "LLM interaction was interrupted by session termination."
-                    
+
                     for attempt in llm_interaction.get("attempts", []):
                         if attempt.get("status") in ["pending", "running"]:
                             attempt["status"] = "failed"
                             attempt["error"] = "Run was interrupted during LLM stream."
-        
+
         # Reset principal flow flag
         if team_state.get("is_principal_flow_running") is True:
             team_state["is_principal_flow_running"] = False

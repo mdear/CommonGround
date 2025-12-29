@@ -1,18 +1,18 @@
 name: associate_llm
 base_llm_config: base_default_llm
 type: llm_config
-description_for_human: "LLM config for tactical tasks (Associate Agents)."
+description_for_human: "LLM config for tactical tasks (Associate Agents). Uses Claude Sonnet 4."
 
 config:
-  model: "openai/gemini-2.5-flash"
-  base_url:
+  model: "anthropic/claude-sonnet-4-20250514"
+  api_key:
     _type: "from_env"
-    var: "GEMINI_BRIDGE_URL"
-    default: "http://127.0.0.1:8765/v1"
-    required: false
-  api_key: "5678"
+    var: "ANTHROPIC_API_KEY"
+    required: true
   temperature:
     _type: "from_env"
     var: "AGENT_TEMPERATURE"
-    default: 0.5
+    default: 0.4
     required: false
+  max_retries: 2
+  wait_seconds_on_retry: 3

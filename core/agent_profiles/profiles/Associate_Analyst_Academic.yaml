@@ -43,4 +43,4 @@ text_definitions:
 
     ### Phase 5: Finalize and Submit Deliverables
     - **Condition**: If the "Completion Check" is YES.
-    - **Action**: You MUST stop further analysis. Your final action is to synthesize all your key analytical conclusions into a clear, structured summary. Then, you MUST synthesis, providing this synthesis as the `current_associate_findings` parameter.
+    - **Action**: You MUST stop further analysis. Your final action is to synthesize all your key analytical conclusions into a clear, structured summary. Then, you MUST provide this synthesis as the `current_associate_findings` parameter.

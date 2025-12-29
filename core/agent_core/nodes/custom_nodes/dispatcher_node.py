@@ -3,18 +3,26 @@
 import logging
 import asyncio
 import copy
-import uuid 
+import uuid
 from datetime import datetime, timezone # Added timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 from pocketflow import AsyncParallelBatchNode # Ensure this is the correct base class
 from ...framework.tool_registry import tool_registry
 # from nodes.base_agent_node import AgentNode # Not directly used here for instantiation
-from ...state.management import _create_flow_specific_state_template 
+from ...state.management import _create_flow_specific_state_template
 from ...framework.profile_utils import get_active_profile_by_name
 from ...framework.handover_service import HandoverService
-# +++ START: New imports +++
-# from utils.server_manager import initialize_mcp_session_for_context # No longer needed
-# +++ END: New imports +++
+# Content selection for budget-aware inheritance
+from ...utils.content_selection import (
+    compute_inheritance_budget_chars,
+    select_inherited_content_with_hydration,
+    format_inherited_content_for_briefing,
+    STRATEGY_LLM_SUMMARY,
+    STRATEGY_NEWEST_FIRST,
+    STRATEGY_EMPTY
+)
+from ...framework.context_budget_guardian import get_model_context_limit
+from ...llm.config_resolver import LLMConfigResolver
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +35,7 @@ Called by the Principal to validate and assign a Work Module to an Associate Age
 @tool_registry(
     name="dispatch_submodules",
     # Associate the tool with our newly created protocol
-    handover_protocol="principal_to_associate_briefing", 
+    handover_protocol="principal_to_associate_briefing",
     description=DESCRIPTION,
     parameters={
         "type": "object",
@@ -61,7 +69,7 @@ Called by the Principal to validate and assign a Work Module to an Associate Age
         },
         "required": ["assignments"]
     },
-    default_knowledge_item_type="DISPATCH_SUBMODULES_RESULT" 
+    default_knowledge_item_type="DISPATCH_SUBMODULES_RESULT"
 )
 class DispatcherNode(AsyncParallelBatchNode):
     """
@@ -71,6 +79,157 @@ class DispatcherNode(AsyncParallelBatchNode):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         logger.debug("dispatcher_node_initialized")
+
+    async def _preselect_inherited_content(
+        self,
+        inherit_messages_from: List[str],
+        work_modules: Dict[str, Any],
+        run_context: Dict,
+        target_profile_logical_name: str
+    ) -> Tuple[List[Dict], Dict[str, Any]]:
+        """
+        Pre-select content from source modules within a computed budget.
+
+        This method implements budget-aware content inheritance to prevent
+        new Associates from being "born over-budget".
+
+        Algorithm:
+        1. Resolve target agent's context limit from its LLM config
+        2. Compute per-source budget: (limit * 0.40) / num_sources
+        3. For each source, use two-tier selection:
+           - Tier 1: Use deliverables.primary_summary if it fits
+           - Tier 2: Fall back to newest-first message selection
+        4. Hydrate messages BEFORE selection to get accurate sizing
+
+        Args:
+            inherit_messages_from: List of source module IDs
+            work_modules: Dict of all work modules
+            run_context: Global run context (for KB and config access)
+            target_profile_logical_name: Profile name of the spawning agent
+
+        Returns:
+            Tuple of (preselected_messages, selection_metadata)
+        """
+        if not inherit_messages_from:
+            return [], {"skipped": True, "reason": "no_sources"}
+
+        # Get Knowledge Base for hydration
+        kb = run_context.get("runtime", {}).get("knowledge_base")
+
+        # Resolve target agent's context limit
+        agent_profiles_store = run_context.get("config", {}).get("agent_profiles_store", {})
+        shared_llm_configs = run_context.get("config", {}).get("shared_llm_configs_ref", {})
+
+        target_context_limit = 200000  # Default conservative limit
+
+        try:
+            target_profile = get_active_profile_by_name(agent_profiles_store, target_profile_logical_name)
+            if target_profile:
+                llm_config_ref = target_profile.get("llm_config_ref")
+                if llm_config_ref and shared_llm_configs:
+                    resolver = LLMConfigResolver(shared_llm_configs)
+                    resolved_config = resolver.resolve(target_profile)
+                    model_name = resolved_config.get("model", "")
+                    target_context_limit = get_model_context_limit(model_name, resolved_config)
+        except Exception as e:
+            logger.warning("dispatcher_context_limit_resolution_failed", extra={
+                "profile": target_profile_logical_name,
+                "error": str(e),
+                "fallback": target_context_limit
+            })
+
+        # Compute per-source budget
+        num_sources = len(inherit_messages_from)
+        per_source_budget = compute_inheritance_budget_chars(target_context_limit, num_sources)
+
+        logger.info("dispatcher_preselect_started", extra={
+            "inherit_from": inherit_messages_from,
+            "target_context_limit": target_context_limit,
+            "per_source_budget_chars": per_source_budget
+        })
+
+        # Process each source module
+        all_preselected = []
+        selection_metadata = {
+            "target_context_limit": target_context_limit,
+            "per_source_budget_chars": per_source_budget,
+            "sources": {}
+        }
+
+        for source_module_id in inherit_messages_from:
+            source_module = work_modules.get(source_module_id)
+            if not source_module:
+                logger.warning("dispatcher_preselect_source_not_found", extra={
+                    "source_module_id": source_module_id
+                })
+                selection_metadata["sources"][source_module_id] = {
+                    "error": "module_not_found"
+                }
+                continue
+
+            # Get the most recent context_archive entry
+            context_archive = source_module.get("context_archive", [])
+            if not context_archive:
+                logger.debug("dispatcher_preselect_no_archive", extra={
+                    "source_module_id": source_module_id
+                })
+                selection_metadata["sources"][source_module_id] = {
+                    "error": "no_context_archive"
+                }
+                continue
+
+            latest_archive = context_archive[-1]
+
+            # Perform selection with hydration
+            try:
+                selected_content, content_metadata = await select_inherited_content_with_hydration(
+                    context_archive_entry=latest_archive,
+                    budget_chars=per_source_budget,
+                    knowledge_base=kb,
+                    source_id=source_module_id
+                )
+
+                # Format for briefing injection
+                formatted_messages = format_inherited_content_for_briefing(
+                    content=selected_content,
+                    metadata=content_metadata,
+                    source_id=source_module_id
+                )
+
+                all_preselected.extend(formatted_messages)
+                selection_metadata["sources"][source_module_id] = content_metadata
+
+                logger.info("dispatcher_preselect_source_complete", extra={
+                    "source_module_id": source_module_id,
+                    "strategy": content_metadata.get("strategy"),
+                    "chars_used": content_metadata.get("chars_used", 0),
+                    "items_selected": content_metadata.get("items_selected", 0)
+                })
+
+            except Exception as e:
+                logger.error("dispatcher_preselect_source_failed", extra={
+                    "source_module_id": source_module_id,
+                    "error": str(e)
+                }, exc_info=True)
+                selection_metadata["sources"][source_module_id] = {
+                    "error": str(e)
+                }
+
+        total_chars = sum(
+            meta.get("chars_used", 0)
+            for meta in selection_metadata["sources"].values()
+            if isinstance(meta, dict) and "chars_used" in meta
+        )
+        selection_metadata["total_chars_selected"] = total_chars
+        selection_metadata["total_messages_selected"] = len(all_preselected)
+
+        logger.info("dispatcher_preselect_complete", extra={
+            "total_chars": total_chars,
+            "total_messages": len(all_preselected),
+            "sources_processed": len(inherit_messages_from)
+        })
+
+        return all_preselected, selection_metadata
 
     async def prep_async(self, shared: Dict) -> List[Dict]:
         logger.debug("dispatcher_prep_async_started")
@@ -99,6 +258,13 @@ class DispatcherNode(AsyncParallelBatchNode):
         assigned_module_ids_in_this_call = set()
 
         for assign_idx, assignment_item in enumerate(assignments_input):
+            # Defensive: LLM may return malformed data (e.g., strings instead of dicts)
+            if not isinstance(assignment_item, dict):
+                err_msg = f"Assignment at index {assign_idx} is not a dict (got {type(assignment_item).__name__}). Raw value: {str(assignment_item)[:100]}"
+                logger.warning("dispatcher_prep_malformed_assignment", extra={"index": assign_idx, "type": type(assignment_item).__name__, "error_message": err_msg})
+                failed_assignments_at_prep.append({"input": str(assignment_item)[:100], "reason": err_msg})
+                continue
+
             module_id = assignment_item.get("module_id_to_assign")
             agent_profile_logical_name = assignment_item.get("agent_profile_logical_name")
             assigned_role_name = assignment_item.get("assigned_role_name")
@@ -128,7 +294,7 @@ class DispatcherNode(AsyncParallelBatchNode):
             if not actual_profile_details:
                 failed_assignments_at_prep.append({"input": assignment_item, "reason": f"Profile '{agent_profile_logical_name}' not found or inactive."})
                 continue
-            
+
             assignment_package = {
                 "original_assignment_input": assignment_item,
                 "resolved_profile_instance_id": actual_profile_details.get("profile_id"),
@@ -163,7 +329,7 @@ class DispatcherNode(AsyncParallelBatchNode):
         module_id = module_to_execute["module_id"]
         executing_associate_id = assignment_package["executing_associate_id"]
         profile_logical_name = assignment_package["resolved_profile_logical_name"]
-        
+
         logger.info("dispatcher_exec_assignment_started", extra={
             "module_id": module_id,
             "profile_logical_name": profile_logical_name,
@@ -173,7 +339,7 @@ class DispatcherNode(AsyncParallelBatchNode):
         module_to_update = copy.deepcopy(team_state_global.get("work_modules", {}).get(module_id))
         if not module_to_update:
             return {"error": f"Module {module_id} not found at execution time."}
-        
+
         start_time_iso = datetime.now(timezone.utc).isoformat()
         module_to_update["status"] = "ongoing"
         module_to_update["updated_at"] = start_time_iso
@@ -200,22 +366,57 @@ class DispatcherNode(AsyncParallelBatchNode):
         team_state_global.setdefault("dispatch_history", []).append(history_entry)
         logger.info("dispatcher_history_entry_added", extra={"executing_associate_id": executing_associate_id, "status": "LAUNCHING"})
 
+        # --- Budget-Aware Content Pre-Selection ---
+        # If inherit_messages_from is specified, pre-select content within budget
+        # BEFORE calling HandoverService to ensure budget compliance
+        original_assignment = assignment_package.get("original_assignment_input", {})
+        inherit_messages_from = original_assignment.get("inherit_messages_from", [])
+        preselected_messages = []
+        preselection_metadata = {}
+
+        if inherit_messages_from:
+            try:
+                preselected_messages, preselection_metadata = await self._preselect_inherited_content(
+                    inherit_messages_from=inherit_messages_from,
+                    work_modules=team_state_global.get("work_modules", {}),
+                    run_context=run_context_global,
+                    target_profile_logical_name=profile_logical_name
+                )
+                logger.info("dispatcher_content_preselection_complete", extra={
+                    "module_id": module_id,
+                    "total_chars": preselection_metadata.get("total_chars_selected", 0),
+                    "total_messages": len(preselected_messages)
+                })
+            except Exception as e:
+                logger.error("dispatcher_content_preselection_failed", extra={
+                    "module_id": module_id,
+                    "error": str(e)
+                }, exc_info=True)
+                # Continue with empty preselected content - let HandoverService use fallback
+        # --- End Budget-Aware Content Pre-Selection ---
+
         try:
             # Build a temporary source_context to simulate the state when the Principal calls the tool
+            # Inject pre-selected content into parameters for HandoverService to use
+            enhanced_parameters = original_assignment.copy()
+            if preselected_messages:
+                enhanced_parameters["_preselected_inherited_messages"] = preselected_messages
+                enhanced_parameters["_preselection_metadata"] = preselection_metadata
+
             temp_source_context_for_handover = {
-                "state": { 
+                "state": {
                     "current_action": {
                         # Place the current assignment's parameters into current_action.parameters
-                        "parameters": assignment_package.get("original_assignment_input", {})
+                        "parameters": enhanced_parameters
                     }
                 },
                 "refs": parent_context["refs"],
                 "meta": parent_context["meta"]
             }
-            
+
             # Call HandoverService
             inbox_item_data = await HandoverService.execute(
-                "principal_to_associate_briefing", 
+                "principal_to_associate_briefing",
                 temp_source_context_for_handover
             )
 
@@ -231,14 +432,14 @@ class DispatcherNode(AsyncParallelBatchNode):
             "consumption_policy": "consume_on_read",
             "metadata": {"created_at": datetime.now(timezone.utc).isoformat()}
         })
-        
+
         principal_last_turn_id = parent_context['state'].get("last_turn_id")
         associate_sub_context_state['last_turn_id'] = principal_last_turn_id
         logger.debug("dispatcher_last_turn_id_passed", extra={"last_turn_id": principal_last_turn_id, "executing_associate_id": executing_associate_id})
 
         principal_agent_id = parent_context['meta'].get("agent_id")
         assigned_role_name = assignment_package.get("assigned_role_name")
-        
+
         associate_sub_context: Dict[str, Any] = {
             "meta": {
                 "run_id": run_id,
@@ -255,9 +456,9 @@ class DispatcherNode(AsyncParallelBatchNode):
             "runtime_objects": {},
             "refs": { "run": run_context_global, "team": team_state_global }
         }
-        
+
         logger.info("dispatcher_associate_starting", extra={"executing_associate_id": executing_associate_id})
-        
+
         completed_associate_context = None
         associate_exec_status = "error"
         last_turn_id = None
@@ -268,7 +469,7 @@ class DispatcherNode(AsyncParallelBatchNode):
                 logger.info("dispatcher_associate_task_registered", extra={"executing_associate_id": executing_associate_id})
             from ...flow import run_associate_async
             completed_associate_context = await run_associate_async(associate_sub_context)
-            
+
             final_associate_state = completed_associate_context.get("state", {})
             last_turn_id = final_associate_state.get("last_turn_id")
 
@@ -280,17 +481,17 @@ class DispatcherNode(AsyncParallelBatchNode):
             final_associate_state = completed_associate_context.setdefault("state", {})
             final_associate_state["error_message"] = f"Dispatcher critical error: {str(e)}"
             final_associate_state.setdefault("deliverables", {})["error"] = f"Dispatcher critical error: {str(e)}"
-        
+
         finally:
             end_time_iso = datetime.now(timezone.utc).isoformat()
             final_outcome = "completed_success" if associate_exec_status == "success" else "completed_error"
-            
+
             final_associate_state = completed_associate_context.get("state", {}) if completed_associate_context else {}
             deliverables_from_associate = final_associate_state.get("deliverables", {})
             error_details_from_associate = final_associate_state.get("error_message")
-            
+
             all_messages = final_associate_state.get("messages", [])
-            
+
             # Filter out messages that are marked as not for handover (e.g., initial briefings).
             # The msg.get("_internal", {}) ensures safe access even if the _internal key doesn't exist.
             new_messages_from_associate = [
@@ -309,7 +510,7 @@ class DispatcherNode(AsyncParallelBatchNode):
                     summary = ", ".join(deliverables_from_associate.keys())
                     history_entry_to_update["final_summary"] = f"Deliverables: {summary}"
                 logger.info("dispatcher_history_updated", extra={"executing_associate_id": executing_associate_id, "new_status": history_entry_to_update['status']})
-            
+
             history_list = module_to_update.get("assignee_history", [])
             entry_to_update = next((h for h in reversed(history_list) if h.get("dispatch_id") == executing_associate_id and h.get("outcome") == "running"), None)
             if entry_to_update:
@@ -320,7 +521,7 @@ class DispatcherNode(AsyncParallelBatchNode):
                 "dispatch_id": executing_associate_id, "archived_at": end_time_iso,
                 "messages": final_associate_state.get("messages", []), "deliverables": deliverables_from_associate
             })
-            
+
             module_to_update["status"] = "pending_review"
             module_to_update["review_info"] = {
                 "trigger": "associate_completed" if associate_exec_status == "success" else "associate_failed",
@@ -337,11 +538,11 @@ class DispatcherNode(AsyncParallelBatchNode):
                 logger.info("dispatcher_associate_task_deregistered", extra={"executing_associate_id": executing_associate_id})
 
         return {
-            "executing_associate_id": executing_associate_id, 
+            "executing_associate_id": executing_associate_id,
             "module_id": module_id,
-            "agent_profile_logical_name_used": profile_logical_name, 
+            "agent_profile_logical_name_used": profile_logical_name,
             "status_of_associate_execution": associate_exec_status,
-            "deliverables_from_associate": deliverables_from_associate, 
+            "deliverables_from_associate": deliverables_from_associate,
             "error_detail_from_associate": error_details_from_associate,
             "last_turn_id": last_turn_id,
             "new_messages_from_associate": new_messages_from_associate
@@ -354,7 +555,7 @@ class DispatcherNode(AsyncParallelBatchNode):
         logger.debug("dispatcher_post_async_aggregating", extra={"execution_count": len(exec_res_list), "dispatch_tool_call_id": dispatch_tool_call_id})
 
         failed_assignments_from_prep = principal_state.pop("_temp_dispatcher_prep_failures", [])
-        
+
         num_launched_modules = len(exec_res_list)
         num_successful_executions = sum(1 for res in exec_res_list if res.get("status_of_associate_execution") == "success")
         num_failed_executions = num_launched_modules - num_successful_executions
@@ -373,7 +574,7 @@ class DispatcherNode(AsyncParallelBatchNode):
                 overall_dispatch_op_status = "TOTAL_FAILURE_ASSOCIATES_ALL_FAILED" if num_prep_failures == 0 else "TOTAL_FAILURE_PREP_AND_ASSOC_FAILED"
         elif num_prep_failures > 0 and num_launched_modules == 0 :
              overall_dispatch_op_status = "TOTAL_FAILURE_ALL_PREP_FAILED"
-        
+
         dispatch_op_message = (
             f"Dispatch operation concluded for {original_assignments_requested_count} requested assignment(s). "
             f"{num_launched_modules} module(s) were dispatched. "
@@ -406,13 +607,13 @@ class DispatcherNode(AsyncParallelBatchNode):
             team_state_from_refs_post = shared['refs']['team']
             run_id_from_meta_post = shared['meta']['run_id']
             turn_manager = shared['refs']['run']['runtime'].get('turn_manager')
-            
+
             # Find the Turn that initiated this dispatch
             dispatch_turn = turn_manager._get_turn_by_id(team_state_from_refs_post, principal_state.get("current_turn_id")) if turn_manager else None
 
             if dispatch_turn and turn_manager:
                 last_turn_ids_of_subflows = [res.get("last_turn_id") for res in exec_res_list if res.get("last_turn_id")]
-                
+
                 # Call TurnManager to create the aggregation turn
                 aggregation_turn_id = turn_manager.create_aggregation_turn(
                     team_state=team_state_from_refs_post,
@@ -422,7 +623,7 @@ class DispatcherNode(AsyncParallelBatchNode):
                     dispatch_tool_call_id=dispatch_tool_call_id,
                     aggregation_summary=f"{num_successful_executions}/{num_launched_modules} successful."
                 )
-                
+
                 # Pass the "baton" to the new aggregation turn
                 principal_state['last_turn_id'] = aggregation_turn_id
                 logger.debug("dispatcher_relay_baton_passed", extra={"aggregation_turn_id": aggregation_turn_id})
@@ -448,11 +649,11 @@ class DispatcherNode(AsyncParallelBatchNode):
             "consumption_policy": "consume_on_read",
             "metadata": {"created_at": datetime.now(timezone.utc).isoformat()}
         })
-        
+
         logger.info("dispatcher_post_async_completed", extra={"overall_status": overall_dispatch_op_status})
-        
+
         principal_state["current_action"] = None
-        
+
         try:
             from ...events.event_triggers import trigger_view_model_update
 
@@ -471,7 +672,7 @@ class DispatcherNode(AsyncParallelBatchNode):
         tasks = []
         for prep_item in prep_res_list:
             tasks.append(self.exec_async(prep_item))
-        
+
         exec_res_list = await asyncio.gather(*tasks, return_exceptions=True)
 
         processed_exec_res_list = []

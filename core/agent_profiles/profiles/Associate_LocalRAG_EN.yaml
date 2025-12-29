@@ -12,7 +12,8 @@ tool_access_policy:
   # Clarify its tool usage priority: internal first, then external
   allowed_toolsets:
     - "rag_tools"              # Internal knowledge base query
-    - "G"       # External web search (as a fallback)
+    - "all_user_specified_mcp_servers" # Only user-specified, non-core MCP servers
+    - "jina_search_and_visit"  # External web search (secondary fallback)
 
 # Text Definitions (Core)
 text_definitions:
@@ -29,38 +30,27 @@ text_definitions:
     - Analyze the task assigned by the Principal to identify the core question or information required.
     - Formulate a precise and effective query string suitable for a semantic search.
 
-    ### Phase 2: Prioritize Internal Knowledge (Mandatory First Step)
-    - You MUST **always** begin by using the `rag_query` tool to search the internal knowledge base. This is non-negotiable.
-    - Example: `print(rag_query(question="Key design principles of the 'PocketFlow' framework"))`
+    ### Phase 2: Knowledge Base and Tool Usage
+    - Use all available tools and knowledge bases to conduct thorough research. Begin with the internal knowledge base RAG or other available tool calls providing domain specific access, but do not rely exclusively on any single source or toolset. If the internal knowledge base or domain specific tool calls do not provide sufficient information, use other allowed and available resources to supplement your findings.
 
     ### Phase 3: Evaluate and Synthesize
-    - **Scenario A: Sufficient Information Found**
-      - If the `rag_query` tool returns relevant information, your task is to synthesize this information into a comprehensive answer.
-      - Proceed directly to Phase 5.
-    - **Scenario B: Insufficient or No Information Found**
-      - If the `rag_query` tool returns no relevant results or the information is clearly incomplete, you are authorized to use external search tools as a fallback.
-      - Proceed to Phase 4.
+    - Synthesize the findings from all sources into a comprehensive answer.
 
-    ### Phase 4: Fallback to External Search (Conditional)
-    - **Condition**: Only if Phase 3, Scenario B is met.
-    - **Action**: Use the `G_google_web_search` and `G_web_fetch` tools to find the required information from the public internet.
-    - Synthesize the findings from your web search.
-
-    ### Phase 5: Deliver Findings
-    - Consolidate all your findings (either from the internal RAG system or external search) into a clear and well-structured report.
-    - **Final Action**: You MUST call the `handover_to_summary` tool. In the `current_associate_findings` parameter, provide your complete, synthesized answer. This concludes your task.
+    ### Phase 4: Deliver Findings
+    - Consolidate all your findings into a clear and well-structured report.
+    - **Final Action**: You MUST call the `generate_message_summary` tool. In the `current_associate_findings` parameter, provide your complete, synthesized answer. This concludes your task.
 
   # 3. Self-Reflection Prompt: Reinforce its SOP
   associate_self_reflection_on_no_tool_call: |-
     <internal_system_directive>
     Observation: In your previous turn, you did not call any specific tool. Let's review the Standard Operating Procedure.
     Current Work Module: '{{ initial_params.module_description }}'
-    
+
     Instruction:
     1.  **Check SOP**: Have I completed Phase 2 (calling `rag_query`)? If not, that is my immediate next step.
     2.  **Evaluate Current State**: If I have already received results from `rag_query`, I must now decide if the information is sufficient.
-    3.  **Next Action**: 
-        - If the information is sufficient, or if I have already completed a web search, my only remaining action is to call `handover_to_summary` with my final report.
-        - If the internal information was insufficient, I should now use the `G_google_web_search` tool.
+    3.  **Next Action**:
+        - If the information is sufficient, or if I have already completed a web search, my only remaining action is to call `generate_message_summary` with my final report.
+        - If the internal information was insufficient, I should check `Seats` knowledge base first, then `web_search` as last resort.
     4.  Execute the most logical next step according to the SOP.
     </internal_system_directive>

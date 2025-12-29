@@ -24,7 +24,7 @@ graph TD
 
     %% --- Start of Flow ---
     User[("👤 User")] -- "1- User Request" --> API["🚀 API Server"]
-    
+
     subgraph "Agent Collaboration Workspace"
         direction LR
 
@@ -33,7 +33,7 @@ graph TD
             direction TB
             TeamState["{SHARED}<br>TeamState<br><i>work_modules</i>"]
         end
-        
+
         %% --- Partner Swimlane ---
         subgraph "🟢 Partner (Strategic Partner)"
             direction TB
@@ -66,7 +66,7 @@ graph TD
     %% --- Inter-Lane Connections & Data Flow ---
     HandoverSvc -- "6- Creates & Sends<br>AGENT_STARTUP_BRIEFING" --> PrincipalInbox
     PrincipalInbox --> PrincipalAgent
-    
+
     Dispatcher -- "9- Packages context<br>for sub-task" --> AssociateInbox
     AssociateInbox --> AssociateAgent
 
@@ -76,23 +76,23 @@ graph TD
 
     %% --- Final Connection ---
     Finalize --> |"Notifies Partner"| PartnerAgent
-    
+
     %% --- Background Processes Layer ---
     subgraph "Continuous Background Processes"
         direction LR
         Observability["📈 Turn Manager<br>💾 IIC Persistence"]
         WebSocketEvents["📡 WebSocket Events<br>(Real-time Updates)"]
     end
-    
+
     %% --- Background Connections ---
     API -- "Establishes connection" --> WebSocketEvents
     Observability -- "Sends events via" --> WebSocketEvents
     WebSocketEvents -- "Streams to" --> User
-    
+
     PartnerAgent -.-> |Logs to| Observability
     PrincipalAgent -.-> |Logs to| Observability
     AssociateAgent -.-> |Logs to| Observability
-```    
+```
 
 ## 2. Core Team Roles
 
@@ -124,6 +124,30 @@ graph TD
     2.  **Tool Usage**: Uses specific tools (like `web_search`, `visit_url`) according to the task requirements and its own Profile configuration.
     3.  **Deliverable Submission**: After completing the task, calls the `generate_message_summary` tool to get an instructional prompt, then summarizes the results into a structured JSON `deliverables` object.
 *   **Context and State**: Each Associate Agent operates in an isolated context. **The key difference is** that upon completion, its **entire context** (message history, `deliverables`, etc.) is **collected by the `DispatcherNode` and archived into the `context_archive` of the specific work module it handled**. The system also intelligently filters this context to prevent irrelevant history from being passed on to subsequent agents, optimizing token usage. This realizes the core concept of "context follows the work."
+
+### 2.4 Context Inheritance Between Associates
+
+When an Associate needs context from previously completed work modules (e.g., a synthesis task that builds on research tasks), the Principal can specify `inherit_messages_from` in the dispatch call.
+
+**Budget-Aware Selection**: To prevent context explosion, inherited content is selected within a computed budget:
+
+1.  **Budget Computation**: `(target_context_limit × 0.40) ÷ num_sources`
+2.  **Two-Tier Selection**:
+    - **Tier 1**: Use `deliverables.primary_summary` if available and fits budget
+    - **Tier 2**: Select messages newest-first with hydration before measurement
+3.  **Hydration**: KB tokens in messages are expanded BEFORE selection to ensure accurate sizing
+
+This ensures Associates are never "born over-budget" even when inheriting from multiple large work modules.
+
+```
+Example: E_6 inherits from WM_2 and WM_3
+- Target context: 200K tokens
+- Inheritance pool: 200K × 0.40 = 80K tokens
+- Per source: 80K ÷ 2 = 40K tokens (~160K chars)
+- WM_2 summary (9K chars): ✓ Fits → Use summary
+- WM_3 summary (15K chars): ✓ Fits → Use summary
+- Total inherited: ~24K chars (vs. 60K chars unbounded)
+```
 
 ## 3. Instruction Generator Tool Pattern
 

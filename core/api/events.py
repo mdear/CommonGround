@@ -11,6 +11,17 @@ from datetime import datetime, timezone
 from .session import active_runs_store, active_event_managers # Import global stores
 logger = logging.getLogger(__name__)
 
+# Forward reference to avoid circular import
+_connection_manager = None
+
+def _get_connection_manager():
+    """Lazy import of connection manager to avoid circular imports."""
+    global _connection_manager
+    if _connection_manager is None:
+        from .connection_manager import connection_manager
+        _connection_manager = connection_manager
+    return _connection_manager
+
 class SessionEventManager:
     """Session Event Manager
 
@@ -20,7 +31,7 @@ class SessionEventManager:
     3. Error handling
     4. MCP tool calls
     """
-    
+
     def __init__(self, session_id: str):
         """Initializes the event manager
 
@@ -33,7 +44,7 @@ class SessionEventManager:
         self.on_send: Optional[callable] = None
         # session_id is now the connection credential ID for the WebSocket, mainly used for logging
         logger.debug("event_manager_created", extra={"session_id": session_id})
-        
+
     def attach(self, on_send):
         self.on_send = on_send
 
@@ -46,7 +57,7 @@ class SessionEventManager:
         self.websocket = websocket
         self.is_connected = True
         logger.info("websocket_connection_established", extra={"session_id": self.session_id})
-        
+
     async def disconnect(self):
         """Marks the WebSocket connection as disconnected and tries to cancel associated long-running tasks."""
         original_websocket = self.websocket
@@ -57,7 +68,7 @@ class SessionEventManager:
         # Removed the old task cancellation logic based on top_level_shared.
         # Task cancellation is now handled by the finally block of the websocket_endpoint in api/server.py,
         # based on websocket.state.active_run_tasks.
-        
+
         # Ensure the original websocket connection object is properly closed (if not handled automatically by FastAPI)
         # Usually FastAPI handles the closing, but call it explicitly to be sure
         if original_websocket:
@@ -70,21 +81,42 @@ class SessionEventManager:
                 logger.warning("websocket_close_error", extra={"session_id": self.session_id, "error": str(e)}, exc_info=True)
 
 
-    async def _send(self, message: Dict):
-        """Internal send method, responsible for checking the connection, JSON serialization, and the actual send operation
+    async def _send(self, message: Dict, run_id: Optional[str] = None):
+        """Internal send method with event buffering support.
+
+        If connection is lost but run is in grace period, events are buffered
+        for replay on reconnection.
 
         Args:
             message: The message dictionary to send
+            run_id: Optional run_id for buffering context
         """
+        # Extract run_id from message if not provided
+        if run_id is None:
+            run_id = message.get('run_id')
+
         if not self.is_connected or not self.websocket:
+            # Check if we should buffer this event
+            if run_id:
+                conn_manager = _get_connection_manager()
+                if conn_manager.should_buffer_event(run_id):
+                    # Buffer the event for replay on reconnection
+                    conn_manager.buffer_event(run_id, message.get('type', 'unknown'), message)
+                    logger.debug("event_buffered_for_reconnection", extra={
+                        "session_id": self.session_id,
+                        "run_id": run_id,
+                        "message_type": message.get('type', 'unknown')
+                    })
+                    return
+
             logger.debug("websocket_not_connected_message_dropped", extra={"session_id": self.session_id, "message_type": message.get('type', 'unknown')})
             return
-            
+
         try:
             # Add session ID
             if "session_id" not in message:
                 message["session_id"] = self.session_id
-                
+
             # Manually serialize JSON and send as text
             # Use default=str to handle objects that cannot be directly serialized, converting them to string form
             message_json = json.dumps(message, ensure_ascii=False, default=str)
@@ -100,16 +132,27 @@ class SessionEventManager:
                "WebSocket is not connected" in str(e) or \
                "Cannot call send" in str(e): # For starlette.websockets.WebSocketException
                 logger.warning("websocket_send_failed_connection_closing", extra={"session_id": self.session_id, "message_type": message.get('type', 'unknown'), "error": str(e)})
-                self.is_connected = False 
-                self.websocket = None     
+                self.is_connected = False
+                self.websocket = None
+
+                # Try to buffer the event if in grace period
+                if run_id:
+                    conn_manager = _get_connection_manager()
+                    if conn_manager.should_buffer_event(run_id):
+                        conn_manager.buffer_event(run_id, message.get('type', 'unknown'), message)
+                        logger.debug("event_buffered_after_send_failure", extra={
+                            "session_id": self.session_id,
+                            "run_id": run_id,
+                            "message_type": message.get('type', 'unknown')
+                        })
             else: # Other RuntimeErrors
                 logger.error("message_send_failed_runtime_error", extra={"session_id": self.session_id, "message_type": message.get('type', 'unknown'), "error": str(e)}, exc_info=True)
         except Exception as e: # All other exceptions
             logger.error("message_send_failed_general", extra={"session_id": self.session_id, "message_type": message.get('type', 'unknown'), "error": str(e)}, exc_info=True)
-            
+
     async def emit_llm_chunk(self, run_id: str, agent_id: str, parent_agent_id: Optional[str], chunk_type: str, content: str, stream_id: Optional[str] = None, is_first_chunk: bool = False, is_completion_marker: bool = False, llm_id: Optional[str] = None, contextual_data: Optional[Dict] = None):
         """Sends an LLM streaming output chunk
-        
+
         Args:
             run_id: The run ID
             agent_id: The agent ID
@@ -140,7 +183,7 @@ class SessionEventManager:
             "data": message_data
         }
         await self._send(message)
-            
+
     async def emit_llm_response(self, run_id: str, agent_id: str, parent_agent_id: Optional[str], content: Optional[str], tool_calls: Optional[List[Dict]], reasoning: Optional[str] = None, stream_id: Optional[str] = None, llm_id: Optional[str] = None, contextual_data: Optional[Dict] = None):
         """Sends a complete LLM response
 
@@ -159,9 +202,9 @@ class SessionEventManager:
         content_summary = content[:50] + "..." if content and len(content) > 50 else content
         tool_calls_summary = f"{len(tool_calls)} tool calls" if tool_calls else "No tool calls"
         has_reasoning = "Yes" if reasoning else "No"
-        
+
         logger.debug("llm_response_generated", extra={"run_id": run_id, "agent_id": agent_id, "content_summary": content_summary, "tool_calls_summary": tool_calls_summary, "has_reasoning": has_reasoning})
-        
+
         message_data = {
             "content": content,
             "tool_calls": tool_calls,
@@ -181,11 +224,11 @@ class SessionEventManager:
             "data": message_data
         }
         await self._send(message)
-        
+
     # DEPRECATED: emit_agent_status has been removed
     # Agent status is now tracked through the Turn model in team_state
     # Use turn status ('running', 'completed', 'error') instead
-        
+
     async def emit_resource(self, run_id: str, agent_id: str, resource_type: str, resource_data: Any, contextual_data: Optional[Dict] = None):
         """Sends resource data
 
@@ -205,14 +248,14 @@ class SessionEventManager:
             resource_summary = f"Length: {len(resource_data)}"
         else:
             resource_summary = f"Type: {type(resource_data).__name__}"
-            
+
         logger.debug("resource_emitted", extra={"run_id": run_id, "agent_id": agent_id, "resource_type": resource_type, "resource_summary": resource_summary})
-        
+
         # resource_data is the primary content for the 'data' field of a resource event.
         # If contextual_data is provided, it should be merged into this.
         # However, the typical use of 'data' in 'resource' event is the resource_data itself.
         # Let's clarify: if resource_data is a dict, merge. Otherwise, wrap.
-        
+
         final_data_payload = {}
         if isinstance(resource_data, dict):
             final_data_payload.update(resource_data)
@@ -230,11 +273,11 @@ class SessionEventManager:
             "data": final_data_payload
         }
         await self._send(message)
-        
+
     # DEPRECATED: emit_state/state_sync has been removed
     # State synchronization is now handled through turns_sync and view model updates
     # Use emit_turns_sync() instead for state updates
-            
+
     async def emit_error(self, run_id: Optional[str], agent_id: Optional[str], error_message: str, contextual_data: Optional[Dict] = None):
         """Sends an error message
 
@@ -245,7 +288,7 @@ class SessionEventManager:
             contextual_data: Additional context data, which will be merged into the data field of the event
         """
         logger.error("error_event_emitted", extra={"run_id": run_id or 'N/A', "agent_id": agent_id or 'System', "error_message": error_message})
-        
+
         message_data = {
             "message": error_message
         }
@@ -295,7 +338,7 @@ class SessionEventManager:
         }
         if contextual_data:
             message_data.update(contextual_data)
-        
+
         message = {
             "type": "llm_stream_failed",
             "run_id": run_id,
@@ -350,7 +393,7 @@ class SessionEventManager:
                 if keyword in key_lower:
                     filtered_params[key] = "[REDACTED]"
                     break # Move to the next key once a keyword is found
-            
+
             # Recursively filter if the value is a dictionary
             if isinstance(filtered_params[key], dict):
                  filtered_params[key] = self._filter_credentials(filtered_params[key])
@@ -372,6 +415,22 @@ class SessionEventManager:
             }
         })
 
+    async def emit_run_stopped(self, run_id: str, reason: str = "user_requested"):
+        """Sends a run_stopped event to notify the client that a run has been stopped.
+
+        Args:
+            run_id: The ID of the run that was stopped
+            reason: The reason for stopping (e.g., "user_requested", "error", "completed")
+        """
+        logger.info("run_stopped_emitted", extra={"run_id": run_id, "reason": reason})
+        await self._send({
+            "type": "run_stopped",
+            "data": {
+                "run_id": run_id,
+                "reason": reason
+            }
+        })
+
     # DEPRECATED: emit_tool_result has been removed
     # Tool results are now handled through TOOL_RESULT inbox items in AgentNode
     # Tool interactions are tracked in the Turn model's tool_interactions array
@@ -387,7 +446,7 @@ class SessionEventManager:
             contextual_data: Additional context data
         """
         logger.info("run_config_updated", extra={"run_id": run_id, "config_type": config_type, "item_identifier": item_identifier or 'N/A'})
-        
+
         message_data = {
             "config_type": config_type,
             "item_identifier": item_identifier,
@@ -404,16 +463,16 @@ class SessionEventManager:
         await self._send(message)
 
     async def _hydrate_turn_interactions(self, turns: List[Dict], kb: Any) -> List[Dict]:
-        """ 
+        """
         Iterates through turns and hydrates the result_payload in tool_interactions.
         """
         if not kb:
             return turns
-        
+
         return await kb.hydrate_turn_list_tool_results(turns)
 
     async def emit_turns_sync(self, context: Dict[str, Any]):
-        """ 
+        """
         (Modified) Sends the complete list of turns to synchronize the frontend state, and hydrates before sending.
         """
         if not context:
@@ -470,7 +529,7 @@ class SessionEventManager:
             contextual_data: Additional context data
         """
         logger.info("work_module_updated", extra={"run_id": run_id, "module_id": module_data.get('module_id'), "status": module_data.get('status')})
-        
+
         message_data = {
             "module": module_data
         }
@@ -496,7 +555,7 @@ class SessionEventManager:
         # Add run_id to the message if it doesn't exist
         if "run_id" not in message and run_id is not None:
             message["run_id"] = run_id
-        
+
         if contextual_data and "data" in message and isinstance(message["data"], dict):
             message["data"].update(contextual_data)
         elif contextual_data and "data" not in message:  # If no data field, but contextual_data exists, add it as data
@@ -517,6 +576,42 @@ class SessionEventManager:
             }
         }
         await self._send(message)
+
+    async def emit_system_event(self, event_type: str, data: Dict[str, Any]):
+        """Sends a system-level event (not tied to a specific run).
+
+        Used for connection management events like replay_start, replay_end, etc.
+
+        Args:
+            event_type: The type of system event
+            data: The event data
+        """
+        message = {
+            "type": event_type,
+            "data": data
+        }
+        await self._send(message)
+        logger.debug("system_event_sent", extra={"event_type": event_type})
+
+    async def emit_raw(self, event_type: str, event_data: Dict[str, Any]):
+        """Sends a raw event message directly.
+
+        Used primarily for replaying buffered events during reconnection.
+
+        Args:
+            event_type: The event type
+            event_data: The complete event data dictionary
+        """
+        # If event_data already has the full message structure, use it directly
+        if "type" in event_data:
+            await self._send(event_data)
+        else:
+            # Otherwise wrap it
+            message = {
+                "type": event_type,
+                "data": event_data
+            }
+            await self._send(message)
 
 async def broadcast_project_structure_update(reason: str, details: Dict[str, Any]):
     """

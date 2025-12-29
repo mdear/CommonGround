@@ -7,3 +7,10 @@ frontend/env.local
 frontend/node_modules/
 
 repomix-*
+
+# PID files for frontend and backend
+*.pid
+
+# Local logs
+logs
+logs/*

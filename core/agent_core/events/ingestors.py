@@ -47,19 +47,19 @@ def templated_content_ingestor(payload: Any, params: Dict, context: Dict) -> str
     content_key = payload["content_key"]
     loaded_profile = context.get("loaded_profile", {})
     text_definitions = loaded_profile.get("text_definitions", {})
-    
+
     template_string = text_definitions.get(content_key)
-    
+
     if not template_string:
         logger.error("content_key_not_found_in_profile", extra={"content_key": content_key, "profile_name": loaded_profile.get('name')})
         return f"[Error: Template '{content_key}' not found]"
 
     rendered_content = _apply_simple_template_interpolation(template_string, context)
-    
+
     wrapper_tags = params.get("wrapper_tags")
     if wrapper_tags and isinstance(wrapper_tags, list) and len(wrapper_tags) == 2:
         return f"{wrapper_tags[0]}{rendered_content}{wrapper_tags[1]}"
-        
+
     return rendered_content
 
 @register_ingestor("generic_message_ingestor")
@@ -85,7 +85,7 @@ def tool_result_ingestor(payload: Any, params: Dict, context: Dict) -> str:
     # If it's a dehydrated token, return it directly
     if isinstance(content, str) and content.startswith("<#CGKB-"):
         return content
-    
+
     # For errors, use JSON to preserve full context with clear wrapping tags
     if is_error:
         error_report = {
@@ -116,11 +116,11 @@ def markdown_formatter_ingestor(payload: Any, params: Dict, context: Dict) -> st
     """Converts a payload (usually a dictionary) into a Markdown list."""
     if not isinstance(payload, dict):
         return str(payload)
-    
+
     lines = []
     title = params.get("title", "### Contextual Information")
     lines.append(title)
-    
+
     key_renames = params.get("key_renames", {})
     exclude_keys = params.get("exclude_keys", [])
 
@@ -129,23 +129,72 @@ def markdown_formatter_ingestor(payload: Any, params: Dict, context: Dict) -> st
             continue
         display_key = key_renames.get(key, key.replace('_', ' ').title())
         lines.append(f"*   **{display_key}**: {value}")
-        
+
     return "\n".join(lines)
 
 @register_ingestor("work_modules_ingestor")
 def work_modules_ingestor(payload: Any, params: Dict, context: Dict) -> str:
-    """Formats work_modules dictionary as Markdown using the generic formatter."""
+    """
+    Formats work_modules dictionary as Markdown for context injection.
+
+    CRITICAL: This ingestor filters out large fields like context_archive to prevent
+    context window explosion. Full archives are stored in team_state but never injected.
+    Use dispatch_result_ingestor for deliverables from completed work.
+    """
     if not isinstance(payload, dict):
         return "Work modules data is not in the expected format (dictionary)."
-    
+
+    # Fields to EXCLUDE from injection - these can be 100K+ chars each
+    EXCLUDED_FIELDS = {
+        'context_archive',      # Full message history - stored but never injected
+        'full_context',         # Any full context dumps
+        'raw_messages',         # Raw message lists
+        'messages',             # Message arrays
+        'new_messages_from_associate',  # Associate work history
+    }
+
+    # Fields to SUMMARIZE (show counts/metadata only)
+    SUMMARIZE_FIELDS = {
+        'deliverables': lambda v: f"({len(v)} items)" if isinstance(v, dict) else "(present)" if v else "(none)",
+        'tools_used': lambda v: ', '.join(v[:5]) + ('...' if len(v) > 5 else '') if isinstance(v, list) else str(v),
+    }
+
+    def _filter_module(module_data: dict) -> dict:
+        """Filter a single work module to exclude large fields, preventing context explosion."""
+        filtered = {}
+        for key, value in module_data.items():
+            if key in EXCLUDED_FIELDS:
+                # Log when we skip large fields for debugging
+                if isinstance(value, (list, dict)) and len(str(value)) > 1000:
+                    logger.debug("work_modules_ingestor_field_excluded", extra={
+                        "field": key,
+                        "approx_size": len(str(value))
+                    })
+                continue
+            if key in SUMMARIZE_FIELDS:
+                filtered[key] = SUMMARIZE_FIELDS[key](value)
+            elif isinstance(value, dict) and len(str(value)) > 5000:
+                # Recursively filter nested dicts that are too large
+                filtered[key] = _filter_module(value)
+            else:
+                filtered[key] = value
+        return filtered
+
     lines = [params.get("title", "### Current Work Modules Status")]
     if not payload:
         lines.append("No work modules are currently defined.")
     else:
-        # Use the formatter to handle the entire dictionary
-        formatted_modules = _recursive_markdown_formatter(payload, {}, level=0)
+        # Filter each module before formatting to prevent context explosion
+        filtered_modules = {}
+        for mod_id, mod_data in payload.items():
+            if isinstance(mod_data, dict):
+                filtered_modules[mod_id] = _filter_module(mod_data)
+            else:
+                filtered_modules[mod_id] = mod_data
+
+        formatted_modules = _recursive_markdown_formatter(filtered_modules, {}, level=0)
         lines.extend(formatted_modules)
-        
+
     return "\n".join(lines)
 
 @register_ingestor("available_associates_ingestor")
@@ -153,6 +202,7 @@ def available_associates_ingestor(payload: Any, params: Dict, context: Dict) -> 
     """Formats available Associate list as Markdown with separated data preparation and presentation logic."""
     profile_instance_ids = payload
     if not isinstance(profile_instance_ids, list):
+        logger.warning("available_associates_ingestor_invalid_payload", extra={"payload_type": type(payload).__name__})
         return "Available associates list is not in the expected format (list)."
 
     agent_profiles_store = context.get('refs', {}).get('run', {}).get('config', {}).get('agent_profiles_store')
@@ -160,13 +210,28 @@ def available_associates_ingestor(payload: Any, params: Dict, context: Dict) -> 
         logger.error("available_associates_ingestor: 'agent_profiles_store' not found.")
         return "Error: Profile store not available."
 
+    logger.info("available_associates_ingestor_processing", extra={
+        "payload_count": len(profile_instance_ids),
+        "store_count": len(agent_profiles_store)
+    })
+
     # Step 1: Prepare a clean, structured list of Python objects
     profiles_for_llm = []
     for instance_id in profile_instance_ids:
         profile_dict = get_profile_by_instance_id(agent_profiles_store, instance_id)
-        if not profile_dict or profile_dict.get("is_deleted") or not profile_dict.get("is_active") or profile_dict.get("type") != "associate":
+        if not profile_dict:
+            logger.info("available_associates_ingestor_profile_not_found", extra={"instance_id": instance_id})
             continue
-        
+        if profile_dict.get("is_deleted"):
+            logger.info("available_associates_ingestor_profile_deleted", extra={"instance_id": instance_id})
+            continue
+        if not profile_dict.get("is_active"):
+            logger.info("available_associates_ingestor_profile_inactive", extra={"instance_id": instance_id})
+            continue
+        if profile_dict.get("type") != "associate":
+            logger.info("available_associates_ingestor_wrong_type", extra={"instance_id": instance_id, "type": profile_dict.get("type")})
+            continue
+
         profiles_for_llm.append({
             "profile_name": profile_dict.get('name', 'Unknown'),
             "description": profile_dict.get('description_for_human', 'No description.'),
@@ -181,7 +246,7 @@ def available_associates_ingestor(payload: Any, params: Dict, context: Dict) -> 
         sorted_profiles = sorted(profiles_for_llm, key=lambda p: p.get('profile_name', ''))
         formatted_profiles = _recursive_markdown_formatter(sorted_profiles, {}, level=0)
         lines.extend(formatted_profiles)
-        
+
     return "\n".join(lines)
 
 @register_ingestor("principal_history_summary_ingestor")
@@ -200,9 +265,9 @@ def principal_history_summary_ingestor(payload: Any, params: Dict, context: Dict
         role = msg.get("role", "unknown_role")
         content_summary = str(msg.get("content", ""))
         tool_calls = msg.get("tool_calls")
-        
+
         entry = f"\n- **[{role.upper()}]**: {content_summary[:200]}{'...' if len(content_summary) > 200 else ''}"
-        
+
         if tool_calls and isinstance(tool_calls, list):
             tools_called_parts = []
             for tc in tool_calls:
@@ -212,12 +277,12 @@ def principal_history_summary_ingestor(payload: Any, params: Dict, context: Dict
                 tools_called_parts.append(f"{func_name}({args_summary})")
             if tools_called_parts:
                 entry += f" -> Calls: [{', '.join(tools_called_parts)}]"
-        
+
         output_parts.append(entry)
-    
+
     if len(payload) > max_messages:
         output_parts.append(f"\n... (omitting {len(payload) - max_messages} older messages)")
-        
+
     output_parts.append("\n</principal_activity_log>")
     return "\n".join(output_parts)
 
@@ -227,7 +292,7 @@ def json_history_ingestor(payload: Any, params: Dict, context: Dict) -> str:
     if not isinstance(payload, list):
         logger.warning("json_history_ingestor_expected_list", extra={"payload_type": type(payload).__name__})
         return "[Error: Message history for JSON ingestion was not a list.]"
-    
+
     try:
         history_json_string = json.dumps(payload, ensure_ascii=False, indent=2)
         return f"<message_history_json>\n{history_json_string}\n</message_history_json>"
@@ -240,10 +305,10 @@ def tagged_content_ingestor(payload: Any, params: Dict, context: Dict) -> str:
     """Wraps the payload content with specified XML tags."""
     wrapper_tags = params.get("wrapper_tags")
     content = str(payload)
-    
+
     if wrapper_tags and isinstance(wrapper_tags, list) and len(wrapper_tags) == 2:
         return f"{wrapper_tags[0]}{content}{wrapper_tags[1]}"
-    
+
     logger.warning("tagged_content_ingestor_missing_wrapper_tags")
     return content
 
@@ -274,12 +339,21 @@ def observer_failure_ingestor(payload: Any, params: Dict, context: Dict) -> str:
 
 @register_ingestor("dispatch_result_ingestor")
 def dispatch_result_ingestor(payload: Any, params: Dict, context: Dict) -> str:
-    """Formats 'dispatch_submodules' results into detailed, human and LLM-readable Markdown reports."""
+    """
+    Formats 'dispatch_submodules' results into Markdown reports.
+
+    DESIGN PRINCIPLE: No truncation here. The Associate is responsible for
+    intelligent summarization within their budget. We present their deliverables
+    in full since they've already been summarized appropriately.
+
+    Full message archives are stored in work_modules.context_archive for detailed
+    review if the Principal needs to drill down.
+    """
     if not isinstance(payload, dict) or "content" not in payload:
         return "[Error: Dispatch result format is invalid or content is missing]"
-    
+
     content = payload.get("content", {})
-    
+
     # Overall operation summary
     overall_status = content.get('status', 'UNKNOWN')
     message = content.get('message', 'No message.')
@@ -288,46 +362,56 @@ def dispatch_result_ingestor(payload: Any, params: Dict, context: Dict) -> str:
         f"- **Overall Status**: `{overall_status}`",
         f"- **Details**: {message}"
     ]
-    
+
     # Failed preparation tasks
     failed_prep = content.get("failed_preparation_details", [])
     if failed_prep:
         summary_parts.append("\n**Assignments Failed Before Execution:**")
-        # Use the formatter to show failure details
         summary_parts.extend(_recursive_markdown_formatter(failed_prep, {}, level=0))
 
-    # Detailed work records of executed modules
+    # Work records of executed modules - deliverables in full (already summarized by associate)
     exec_results = content.get("assignment_execution_results", [])
     if exec_results:
-        summary_parts.append("\n**Executed Modules - Detailed Work Records:**")
+        summary_parts.append("\n**Executed Modules - Results:**")
         for result in exec_results:
             module_id = result.get('module_id', 'N/A')
             exec_status = result.get('execution_status', 'unknown')
-            
-            summary_parts.append(f"\n--- Start of Record for Module `{module_id}` (Status: `{exec_status}`) ---")
-            
-            # Display final deliverables
-            deliverables = result.get('deliverables', {})
-            summary_parts.append("#### Final Deliverable (from Associate):")
-            summary_parts.extend(_recursive_markdown_formatter(deliverables, {}, level=0))
+            associate_id = result.get('associate_id', 'N/A')
 
-            # Display the full net-added message history
+            summary_parts.append(f"\n#### Module `{module_id}` (Status: `{exec_status}`, Agent: `{associate_id}`)")
+
+            # Display final deliverables IN FULL - associate has already done smart summarization
+            deliverables = result.get('deliverables', {})
+            if deliverables:
+                summary_parts.append("**Final Deliverable:**")
+                summary_parts.extend(_recursive_markdown_formatter(deliverables, {}, level=0))
+            else:
+                summary_parts.append("*No deliverables provided.*")
+
+            # Display error details if any
+            error_details = result.get('error_details')
+            if error_details:
+                summary_parts.append(f"**Error:** {error_details}")
+
+            # Provide work metadata (not full history - that's in context_archive)
             new_messages = result.get('new_messages_from_associate', [])
             if new_messages:
-                summary_parts.append("\n#### Full Work Log from Associate:")
+                tools_used = []
                 for msg in new_messages:
-                    role = msg.get("role", "unknown").upper()
-                    msg_content = str(msg.get("content", "[No Content]")).strip()
                     tool_calls = msg.get("tool_calls")
-                    
                     if tool_calls:
-                        summary_parts.append(f"**[{role} -> TOOL_CALL]**:")
-                        summary_parts.extend(_recursive_markdown_formatter(tool_calls, {}, level=1))
-                    elif msg_content:
-                       summary_parts.append(f"**[{role}]**: {msg_content}")
-            
-            summary_parts.append(f"--- End of Record for Module `{module_id}` ---\n")
-    
+                        for tc in tool_calls:
+                            tool_name = tc.get("function", {}).get("name", "unknown")
+                            if tool_name not in tools_used:
+                                tools_used.append(tool_name)
+
+                if tools_used:
+                    summary_parts.append(f"**Tools Used:** {', '.join(tools_used)}")
+                summary_parts.append(f"**Work Steps:** {len(new_messages)} messages exchanged")
+                summary_parts.append("*(Full work log available in module's context_archive if needed)*")
+
+            summary_parts.append("")  # Empty line between modules
+
     return "\n".join(summary_parts)
 
 @register_ingestor("user_prompt_ingestor")
@@ -355,7 +439,7 @@ def _recursive_markdown_formatter(data: Any, schema: Dict, level: int = 0) -> Li
                 sub_lines = _recursive_markdown_formatter(value, prop_schema, level + 1)
                 lines.extend(sub_lines)
         return lines
-    
+
     # Smart fallback logic when no detailed schema is available
     if isinstance(data, dict):
         if not data:
@@ -381,7 +465,7 @@ def _recursive_markdown_formatter(data: Any, schema: Dict, level: int = 0) -> Li
     else:
         # Handle other primitive types
         lines.append(f"{indent}  {str(data)}")
-        
+
     return lines
 
 @register_ingestor("protocol_aware_ingestor")
@@ -393,16 +477,16 @@ def protocol_aware_ingestor(payload: Any, params: Dict, context: Dict) -> str:
 
     data = payload["data"]
     schema = payload["schema_for_rendering"]
-    
+
     # Use top-level title from schema if available
     top_level_title = schema.get("x-handover-title", "Agent Briefing")
-    
+
     lines = [f"## {top_level_title}"]
-    
+
     # Start the recursive formatting
     formatted_lines = _recursive_markdown_formatter(data, schema, level=0)
     lines.extend(formatted_lines)
-    
+
     return "\n".join(lines)
 
 logger.info("ingestor_registry_initialized", extra={"count": len(INGESTOR_REGISTRY), "ingestors": list(INGESTOR_REGISTRY.keys())})

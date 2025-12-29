@@ -39,7 +39,7 @@ out/
 Thumbs.db
 
 # Log files
-logs/
+logs/*
 *.log
 
 # Temporary & Cache files

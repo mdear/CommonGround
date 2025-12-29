@@ -1,22 +1,31 @@
 name: principal_llm # Logical name, referenced by Agent Profile's llm_config_ref
 base_llm_config: base_default_llm # Inherits base configuration
 type: llm_config
-description_for_human: "LLM config for high-level strategic tasks (Principal/Partner)."
+description_for_human: "LLM config for high-level strategic tasks (Principal/Partner). Uses Claude Sonnet 4.5 with 1M context."
 
 config:
-  model: "openai/gemini-2.5-pro"
-  base_url:
+  model: "anthropic/claude-sonnet-4-5-20250929"
+  api_key:
     _type: "from_env"
-    var: "GEMINI_BRIDGE_URL"
-    default: "http://127.0.0.1:8765/v1"
-    required: false
-  api_key: "5678"
-    # _type: "from_env"
-    # var: "PRINCIPAL_LLM"
-    # required: false
-    # default: "gemini/gemini-2.5-pro-preview"
+    var: "ANTHROPIC_API_KEY"
+    required: true
   temperature:
     _type: "from_env"
     var: "PRINCIPAL_TEMPERATURE"
     required: false
-    default: 1.0
+    default: 0.4
+  max_retries: 2
+  wait_seconds_on_retry: 5
+  # Enable extended 1M context window for Claude Sonnet 4.5
+  # Requires ANTHROPIC_EXTRA_HEADERS={"anthropic-beta": "context-1m-2025-08-07"} in .env
+  extra_headers:
+    _type: "from_env"
+    var: "ANTHROPIC_EXTRA_HEADERS"
+    required: false
+    default: null
+  # Explicit context limit - used by Context Budget Guardian
+  max_context_tokens:
+    _type: "from_env"
+    var: "PRINCIPAL_MAX_CONTEXT_TOKENS"
+    required: false
+    default: 1000000

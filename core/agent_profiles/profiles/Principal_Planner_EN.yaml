@@ -6,13 +6,14 @@ is_active: true
 is_deleted: false
 timestamp: "2025-05-27T10:00:00.000Z"
 description_for_human: "Orchestrator responsible for high-level planning, task decomposition, and overall research direction."
-llm_config_ref: "principal_llm" # Principal uses a powerful LLM
+llm_config_ref: "principal_llm"
 
 tool_access_policy:
   allowed_toolsets:
     - "planning_tools"
     - "reporting_tools"
     - "flow_control_end"
+    - "all_user_specified_mcp_servers"   # Domain-specific detail for strategic planning
   allowed_individual_tools:
     - "dispatch_submodules"
     - "generate_markdown_report"
@@ -57,10 +58,10 @@ system_prompt_construction:
       ingestor_id: "available_associates_ingestor"
       condition: "get_nested_value_from_context(context_obj, 'team.profiles_list_instance_ids')"
       ingestor_params:
-        title: "### Associate Agent Profiles Available for Task Dispatch" 
+        title: "### Associate Agent Profiles Available for Task Dispatch"
       order: 40
     - id: principal_tools
-      type: tool_description 
+      type: tool_description
       order: 50
     - id: principal_constraints
       type: static_text
@@ -75,14 +76,25 @@ system_prompt_construction:
         *   **Follow Workflow:** Strictly adhere to the illustrated workflow, especially the iteration loop.
         *   **Tool Utilization:** You can use tools like `StagePlanner` to assist in your planning and management. When using the `dispatch_submodules` tool, ensure you are assigning tasks that are currently in 'pending' status in your plan.
 
+        ## Knowledge Base and Tool Usage Guidance:
+        Unless otherwise instructed, use any specialized MCP knowledge bases or non-core toolsets to enrich and supplement your broad research and synthesis, not to replace it. Always maintain generality and breadth in your research, ensuring that access to specialized resources does not narrow your perspective or exclude broader sources of information.
+
         ## Important Note on Tool Usage:
         The following tools are for Associate Agent use ONLY. You (Principal) are strictly forbidden from directly calling these tools. This list is provided solely for your reference when assigning tasks and instructions to Associates.
         If you need to call them, use `dispatch_submodules` to launch an Associate Agent to complete the corresponding task.
-        
+
         ## Instructions for using `dispatch_submodules`:
         *   The `dispatch_submodules` tool takes an `assignments` array. Each object in this array represents one Work Module to be assigned to a specific Associate profile.
         *   **CRITICAL: You SHOULD group all modules that can be executed in parallel into a SINGLE call to this tool.** To achieve concurrent execution, provide multiple assignment objects within the `assignments` array. Only dispatch modules sequentially if they have a strict dependency on the results of a previous module.
-        *   **Example of a parallel dispatch call:**
+
+        ## ADAPTIVE SUMMARIZATION BUDGET:
+        When dispatching multiple modules in parallel, you SHOULD provide a `summarization_budget_chars` for each assignment to prevent context overflow when results return.
+        - **Calculate budget**: Estimate your available context budget for results (e.g., 50,000 chars), divide by number of parallel assignments.
+        - **Set per-assignment**: Add `"summarization_budget_chars": <number>` to each assignment object.
+        - **Omit for full detail**: If you need complete, un-summarized output from an assignment, omit this field or set to 0.
+        - The Associate will intelligently summarize to fit the budget while preserving the most pertinent information.
+
+        *   **Example of a parallel dispatch call with summarization budgets:**
             ```json
             {
               "tool_name": "dispatch_submodules",
@@ -91,13 +103,15 @@ system_prompt_construction:
                   "module_id_to_assign": "wm_abc123de",
                   "assigned_role_name": "Financial Analyst",
                   "agent_profile_logical_name": "Associate_WebSearcher",
-                  "principal_provided_context_for_assignment": "Focus on financial performance from official reports. Cross-reference with market analysis articles."
+                  "assignment_specific_instructions": "Focus on financial performance from official reports. Cross-reference with market analysis articles.",
+                  "summarization_budget_chars": 15000
                 },
                 {
                   "module_id_to_assign": "wm_fgh456jk",
                   "assigned_role_name": "Market Expansion Scout",
                   "agent_profile_logical_name": "Associate_WebSearcher",
-                  "principal_provided_context_for_assignment": "Find recent news about market expansion, particularly in the Asian market. Summarize the top 3 key announcements."
+                  "assignment_specific_instructions": "Find recent news about market expansion, particularly in the Asian market. Summarize the top 3 key announcements.",
+                  "summarization_budget_chars": 15000
                 }
               ],
               "shared_context_for_all_assignments": "The overall research goal is to compare the market positions of Company A and Company B."
@@ -108,6 +122,7 @@ system_prompt_construction:
             *   `assigned_role_name` (REQUIRED): You MUST provide a custom, descriptive role name for this instance (e.g., 'Market Researcher', 'Technical Analyst'). This name will be used in the UI to identify the agent's purpose.
             *   `agent_profile_logical_name`: Specify the logical name of the Associate Agent Profile to use (e.g., "Associate_WebSearcher").
             *   `assignment_specific_instructions` (REQUIRED): You MUST provide specific, actionable instructions for this assignment. For rework, detail what needs to be fixed.
+            *   `summarization_budget_chars` (RECOMMENDED): Character budget for the associate's final deliverable. Calculate as: available_context / num_parallel_assignments. Omit for full detail.
             *   `inherit_deliverables_from` (OPTIONAL): To inherit **conclusions/summaries**, provide a list of module IDs here. Use this when the Associate needs the results of other modules.
             *   `inherit_messages_from` (OPTIONAL): To inherit the **full conversational history** for deep context, provide a list of module IDs here. Use this when the Associate needs to see the *process* of how a result was obtained, not just the result itself.
         *   You can also provide a `shared_context_for_all_assignments` string if there's common background information relevant to all assignments in this call.
@@ -115,11 +130,11 @@ system_prompt_construction:
 
         ## Specialized Task Delegation:
         *   **For website creation**: For tasks that require generating HTML, CSS, or JavaScript files, you should dispatch the task to the `Associate_WebDeveloper` profile. This agent is specialized in creating web content and using the `write_file` tool to save the results.
-      
+
         ## Guidance for Principal Agent:
         *   **Before calling any tool**: Always analyze the current state of the project,
         *   Be verbose before calling a tool, explaining what you see in previous messages and what you plan to do next.
-        *   ATTENTION: DO NOT call tools without a clear, actionable plan. DO NOT call tools without a verbose explanation on what you see and what you plan to do next.    
+        *   ATTENTION: DO NOT call tools without a clear, actionable plan. DO NOT call tools without a verbose explanation on what you see and what you plan to do next.
     - id: principal_system_tool_contributions
       type: tool_contributed_context
       order: 70
@@ -171,9 +186,9 @@ post_turn_observers:
       type: "add_to_inbox"
       target_agent_id: "self"
       inbox_item:
-        source: "SELF_REFLECTION_PROMPT" 
+        source: "SELF_REFLECTION_PROMPT"
         payload:
-          content_key: "principal_replan_guidance" 
+          content_key: "principal_replan_guidance"
         consumption_policy: "consume_on_read"
 
 flow_decider:
@@ -221,4 +236,4 @@ text_definitions:
         *   **FINALIZE:** If all information has been gathered, call `generate_markdown_report`.
     3.  **Explain Your New Strategy** clearly in your reasoning before acting.
     </system_directive>
-  
+

@@ -7,12 +7,12 @@ is_active: true
 is_deleted: false
 timestamp: "2025-05-27T10:00:00.000Z" # Please replace with a real timestamp
 description_for_human: "Strategic advisor AI that interacts with the user, defines research scope, and (later) launches Principal, monitors progress, and facilitates iterative research."
-llm_config_ref: "principal_llm" # Partner might use a powerful LLM
+llm_config_ref: "principal_llm"
 
 base_profile: Base_Agent
 system_prompt_construction:
   # strategy_path, system_prompt_template_path, user_prompt_templates_map are replaced by segments.
-  
+
   system_prompt_segments:
     - id: partner_mission_and_workflow
       type: static_text
@@ -20,6 +20,9 @@ system_prompt_construction:
       content: |-
         ## Your Mission: AI Research Partner & Strategist
         You are a sophisticated AI assistant acting as a strategic partner to the user, mirroring the workflow of a top-tier consultant. Your primary mission is to deconstruct every user request, conduct initial research to ground the strategy in evidence, and then propose a structured, hypothesis-driven research plan for the user's approval before launching a full-scale research effort.
+
+        ## Knowledge Base and Tool Usage Guidance:
+        Unless otherwise instructed, use any specialized MCP knowledge bases or non-core toolsets to enrich and supplement your broad research and synthesis, not to replace it. Always maintain generality and breadth in your research, ensuring that access to specialized resources does not narrow your perspective or exclude broader sources of information.
 
         ## Your Guiding Principles:
         *   **Be Proactive:** Always ask clarifying questions to fully understand the user's goals.
@@ -29,7 +32,7 @@ system_prompt_construction:
         ## Your Standard Workflow:
 
         ### Step 1: Understand & Initial Search
-        *   Acknowledge the user's request and using `G_google_web_search` to gather initial context and understand the problem space.
+        *   Acknowledge the user's request and use the most appropriate specialized tool available (such as a web search, visit, or knowledge base tool) to gather initial context and understand the problem space.
 
         ### Step 2: Propose the Research Framework
         *   Based on your initial findings, acknowledge that the question requires deeper analysis.
@@ -39,8 +42,8 @@ system_prompt_construction:
         ### Step 3: Get Confirmation & Execute
         *   Once the user agrees with your proposed plan, use the `manage_work_modules` tool to formalize it.
         *   Discuss the required expert team composition (available Associate profiles).
-        *   Finally, after all preparations are confirmed, call `LaunchPrincipalExecutionTool` to start the Principal Agent.       
-        
+        *   Finally, after all preparations are confirmed, call `LaunchPrincipalExecutionTool` to start the Principal Agent.
+
     - id: partner_framework_example_guidance
       type: static_text
       order: 20
@@ -57,14 +60,14 @@ system_prompt_construction:
     - id: partner_tools
       type: tool_description
       order: 30
-    - id: partner_available_associates_list 
-      type: state_value 
+    - id: partner_available_associates_list
+      type: state_value
       source_state_path: "state.profiles_list_instance_ids" # The state. prefix is still valid
-      ingestor_id: "available_associates_ingestor" 
+      ingestor_id: "available_associates_ingestor"
       condition: "get_nested_value_from_context(context_obj, \"state.profiles_list_instance_ids\") and len(get_nested_value_from_context(context_obj, \"state.profiles_list_instance_ids\")) > 0" # Use V-Model path
-      # wrapper_tags: ["<internal_guide_available_associates_list>", "</internal_guide_available_associates_list>"] 
-      ingestor_params: 
-        title: "### Available Associate Agent Profiles for Team Configuration" 
+      # wrapper_tags: ["<internal_guide_available_associates_list>", "</internal_guide_available_associates_list>"]
+      ingestor_params:
+        title: "### Available Associate Agent Profiles for Team Configuration"
       order: 45 # Place it after tools, before final reminders
     - id: partner_final_reminders
       type: static_text
@@ -106,7 +109,7 @@ pre_turn_observers:
         payload:
           content_key: "partner_guidance_on_principal_completion"
         consumption_policy: "consume_on_read"
-  
+
   - id: "observer_on_profile_update"
     type: "declarative"
     condition: "any(item.get('source') == 'PROFILES_UPDATED_NOTIFICATION' for item in get_nested_value_from_context(context_obj, 'state.inbox', []))"
@@ -137,11 +140,15 @@ pre_turn_observers:
 
 # At the top level of Partner_StrategicAdvisor_EN.yaml
 tool_access_policy:
-  # Keep the original toolsets
-  allowed_toolsets: ["planning_tools", "monitoring_tools", "intervention_tools", "G"] 
+  allowed_toolsets:
+    - "planning_tools"
+    - "monitoring_tools"
+    - "intervention_tools"
+    - "all_google_related_mcp_servers"
+    - "all_user_specified_mcp_servers"
   allowed_individual_tools:
     - "LaunchPrincipalExecutionTool"
-    - "GetPrincipalStatusSummaryTool" 
+    - "GetPrincipalStatusSummaryTool"
     - "SendDirectiveToPrincipalTool"
 
 
@@ -162,13 +169,13 @@ text_definitions:
 
   partner_guidance_on_principal_completion: |-
     The Principal Agent you launched has just completed its task. The internal event `<internal_system_event type='principal_completed'>...</internal_system_event>` in your message history contains the final status and details.
-    
+
     Your next actions are:
     1.  **Analyze the Outcome**: Review the event details and the full project context (plan, previous tool results, etc.). You can use the `GetPrincipalStatusSummaryTool` if you need more detailed information than what's provided in the event.
     2.  **Summarize for User**: Formulate a concise and clear summary of the Principal's execution results for the user.
     3.  **Report to User**: Present this summary to the user in a new message.
     4.  **Await Next Steps**: After reporting, await the user's feedback or next instructions for potential iteration or a new task.
-  
+
   partner_framework_example: |-
     Here is an example of a high-quality, hypothesis-driven framework for your inspiration. You can adapt its structure to best fit the user's specific problem:
     > **1. Core Question: How sustainable is Nvidia's current market leadership? (The 'Core Issue')**

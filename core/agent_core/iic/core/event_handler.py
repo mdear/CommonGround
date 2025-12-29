@@ -41,7 +41,7 @@ async def _save_minimal_iic_file(run_context: dict, iic_path: str):
             },
             content=""
         )
-        
+
         import aiofiles
         async with aiofiles.open(iic_path, 'w', encoding='utf-8') as f:
             await f.write(root_block.to_iic())
@@ -77,7 +77,7 @@ class EventHandler:
                     slug = re.sub(r'[\s_]+', '-', slug)
                     if not slug:
                         slug = f"run-summary-{run_id[:4]}"
-                
+
                     logger.info("run_using_user_provided_filename", extra={"run_id": run_id, "initial_filename": initial_filename, "slug": slug})
                     await self.rename_iic_file(run_id, slug)
                     return # Important: exit after using the provided name
@@ -88,14 +88,14 @@ class EventHandler:
 
             prompt = f"Please summarize the following user query into a concise, 4-5 word, filename-friendly English phrase (in slug format). Return only the filename, for example: 'research-ai-ethics-2024'. Query: '{initial_text}'"
             messages = [{"role": "user", "content": prompt}]
-            
+
             # 1. Resolve fast_utils_llm config
             resolver = LLMConfigResolver(shared_llm_configs=SHARED_LLM_CONFIGS)
             fast_utils_llm_config = resolver.resolve({"llm_config_ref": "fast_utils_llm"})
 
             # 2. Call LLM
             response = await call_litellm_acompletion(
-                messages=messages, 
+                messages=messages,
                 llm_config=fast_utils_llm_config,
                 stream=False
             )
@@ -110,7 +110,7 @@ class EventHandler:
                 slug = f"run-summary-{run_id[:4]}"
 
             logger.info("llm_proposed_run_name", extra={"run_id": run_id, "proposed_name": proposed_name, "slug": slug})
-            
+
             # Call the atomic rename method
             await self.rename_iic_file(run_id, slug)
 
@@ -171,7 +171,7 @@ class EventHandler:
             #    The new_name_slug here is the display name needed by the frontend (without .iic).
             try:
                 asyncio.create_task(broadcast_project_structure_update(
-                    "rename_run", 
+                    "rename_run",
                     {"run_id": run_id, "new_name": new_name_slug}
                 ))
                 logger.info("project_structure_update_broadcast_triggered", extra={"run_id": run_id})
@@ -194,7 +194,7 @@ class EventHandler:
             if context is None:
                 logger.error("context_not_found_for_run", extra={"run_id": run_id})
                 return
-            
+
             # --- Update project index ---
             try:
                 project_id = context.get("project_id", "default")
@@ -229,7 +229,7 @@ class EventHandler:
         if not context:
             logger.warning("persistence_init_failed_context_not_found", extra={"run_id": run_id})
             return False
-        
+
         # Check if it is a resumed run
         resumed_path = context.get("meta", {}).get("source_iic_path")
 
@@ -244,7 +244,7 @@ class EventHandler:
             project_id = context.get("project_id", "default")
             iic_dir = get_iic_dir(project_id)
             initial_path = os.path.join(iic_dir, f"{run_id}.iic")
-            
+
             self.iic_files[run_id] = initial_path
             self.run_locks[run_id] = asyncio.Lock()
             logger.info("persistence_initialized_for_new_run", extra={"run_id": run_id, "initial_path": initial_path})
@@ -253,13 +253,13 @@ class EventHandler:
             initial_text = context.get("team_state", {}).get("question", "")
             if initial_text:
                 asyncio.create_task(self._trigger_intelligent_naming(run_id, initial_text))
-        
+
         return True
 
     async def on_message(self, message_json):
         """
         Handle incoming messages.
-        
+
         Args:
             message_json (dict): The message to handle.
         """
@@ -267,10 +267,10 @@ class EventHandler:
             body = json.loads(message_json)
             if not body:
                 return
-            
+
             msg_type = body.get("type", "")
             session_id = body.get("session_id", "")
-            
+
             # Extract run_id based on message type, as 'run_ready' has it nested
             run_id = None
             if msg_type == "run_ready":
@@ -290,12 +290,28 @@ class EventHandler:
             # Persistence logic is now triggered by 'turn_completed'
             if msg_type == "turn_completed":
                 logger.debug("persistence_triggered_by_event", extra={"msg_type": msg_type, "run_id": run_id})
-                
+
                 # Initialize persistence if it's the first time for this run
                 if await self._initialize_run_persistence_if_needed(run_id):
                     # Call the core persistence function
                     try:
                         await self.sync_run_to_iic(run_id)
+
+                        # Also save checkpoint for connection manager (for reconnection resilience)
+                        try:
+                            from api.connection_manager import connection_manager
+                            context = active_runs_store.get(run_id)
+                            if context:
+                                # Save a lightweight checkpoint for quick reconnection
+                                checkpoint_data = {
+                                    "run_id": run_id,
+                                    "status": context.get("meta", {}).get("status"),
+                                    "turn_count": len(context.get("team_state", {}).get("turns", [])),
+                                    "has_knowledge_base": bool(context.get("team_state", {}).get("knowledge_base"))
+                                }
+                                connection_manager.save_checkpoint(run_id, checkpoint_data)
+                        except Exception as e:
+                            logger.debug("checkpoint_save_skipped", extra={"run_id": run_id, "reason": str(e)})
                     except Exception as e:
                         logger.error("sync_run_to_iic_failed", extra={"run_id": run_id, "error": str(e)}, exc_info=True)
                 else:

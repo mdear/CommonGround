@@ -1,9 +1,33 @@
 {
+  "_documentation": {
+    "description": "MCP Server Configuration - Defines external tool servers available to agents",
+    "category_semantics": {
+      "google_related": "Google/Gemini ecosystem servers. Use 'all_google_related_mcp_servers' in profiles to include these when enabled.",
+      "user_specified": "User-added domain-specific servers. Use 'all_user_specified_mcp_servers' in profiles to include these when enabled.",
+      "uncategorized": "Servers without explicit category. NOT included in any category-based toolset. Must be referenced by explicit server name."
+    },
+    "important_notes": [
+      "The 'category' field is REQUIRED for servers to be included in category-based toolsets.",
+      "Servers without a 'category' field default to 'uncategorized' and will NOT be matched by 'all_user_specified_mcp_servers' or 'all_google_related_mcp_servers'.",
+      "Set 'enabled: true' to activate a server. Disabled servers are never included in any toolset.",
+      "The 'transport' field is required: 'http' for HTTP-based servers, 'stdio' for process-based servers."
+    ],
+    "adding_new_server": "To add a new user server: 1) Add entry below, 2) Set category to 'user_specified', 3) Set enabled to true, 4) Profiles using 'all_user_specified_mcp_servers' will automatically include it."
+  },
   "mcpServers": {
     "G": {
       "transport": "http",
       "url": "http://localhost:8765/mcp",
-      "enabled": true
+      "enabled": false,
+      "category": "google_related",
+      "_comment": "Gemini CLI bridge - provides Google Search and web fetch capabilities"
+    },
+    "Seats": {
+      "transport": "http",
+      "url": "http://localhost:4000/mcp",
+      "enabled": true,
+      "category": "user_specified",
+      "_comment": "Example user-specified domain knowledge server"
     }
   }
 }

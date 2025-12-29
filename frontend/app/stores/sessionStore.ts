@@ -4,6 +4,7 @@ import { CSSProperties } from 'react';
 import { selectionStore } from './selectionStore'; // Import selectionStore
 import { config } from '@/app/config';
 import { ProjectService } from '@/lib/api';
+import { getSessionManager, SessionManager, SessionTokens } from '@/lib/sessionManager';
 import type { Turn as OriginalTurn, ToolInteraction } from '@/app/chat/types/conversation'; // <-- New import
 
 // Define the shape of `llm_interaction` as we expect it, including `actual_usage`.
@@ -31,7 +32,7 @@ export interface FlowNodeData {
   final_content?: string | null; // <--- New field for final aggregated content
   timestamp?: string;
   originalId?: string;
-  
+
   // ---> New fields <---
   turn_id?: string;
   agent_id?: string;
@@ -39,24 +40,24 @@ export interface FlowNodeData {
 
   // DEBUG: For displaying the node's line number (will be removed later)
   debugRowNumber?: number;
-  
+
   // Actual height of the node for precise edge length calculation
   actualHeight?: number;
 
   // --- New fields (v3.0) ---
   layerMaxContentLevel?: 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL';
-  
+
   // For tool nodes, populated when the tool is called
   tool_call_details?: {
     tool_name: string;
     // Arguments are parsed into an object for easy frontend use
-    arguments: Record<string, unknown>; 
+    arguments: Record<string, unknown>;
   } | null;
-  
+
   // For tool nodes, populated after the tool returns a result
   tool_result?: {
     // The result can be of any type, but a serializable object is recommended
-    content: unknown; 
+    content: unknown;
     is_error: boolean;
   } | null;
 
@@ -266,6 +267,14 @@ export interface RunReady {
   };
 }
 
+export interface RunStopped {
+  type: 'run_stopped';
+  data: {
+    run_id: string;
+    reason: string;
+  };
+}
+
 export interface AvailableToolsetsResponse {
   type: 'available_toolsets_response';
   run_id: null; // This message is not specific to a run
@@ -431,6 +440,49 @@ export interface TokenUsageUpdate {
   data: TokenUsageStats;
 }
 
+// Session resilience message types
+export interface PingMessage {
+  type: 'ping';
+  timestamp?: number;
+}
+
+export interface HeartbeatAckMessage {
+  type: 'heartbeat_ack';
+  timestamp?: string;
+  serverTime: string;
+  sessionValid: boolean;
+}
+
+export interface ReconnectedMessage {
+  type: 'reconnected';
+  run_id: string;
+  run_status: string;
+  buffered_events?: unknown[];
+  events_replayed?: number;
+  message: string;
+}
+
+export interface ReconnectErrorMessage {
+  type: 'reconnect_error';
+  error: string;
+  run_id?: string;
+}
+
+export interface ReplayStartMessage {
+  type: 'replay_start';
+  count: number;
+}
+
+export interface ReplayEndMessage {
+  type: 'replay_end';
+  count: number;
+}
+
+export interface SessionExpiredMessage {
+  type: 'session_expired';
+  reason: string;
+}
+
 export type WebSocketMessage =
   | LLMChunk
   | LLMResponse
@@ -438,6 +490,7 @@ export type WebSocketMessage =
   | AgentStatus
   | ErrorMessage
   | RunReady
+  | RunStopped
   | AvailableToolsetsResponse
   | LLMRequestParams
   | LLMStreamStarted
@@ -452,7 +505,14 @@ export type WebSocketMessage =
   | ViewModelUpdateFailed
   | TurnsSync
   | ProjectStructureUpdated
-  | TokenUsageUpdate;
+  | TokenUsageUpdate
+  | PingMessage
+  | HeartbeatAckMessage
+  | ReconnectedMessage
+  | ReconnectErrorMessage
+  | ReplayStartMessage
+  | ReplayEndMessage
+  | SessionExpiredMessage;
 
 export interface DispatchHistoryEntry {
   dispatch_instance_id: string;
@@ -475,11 +535,17 @@ class SessionStore {
   isConnected: boolean = false;
   isConnecting: boolean = false;
   error: string | null = null;
-  isResuming: boolean = false; 
+  isResuming: boolean = false;
   private maxRetryAttempts: number = 3;
   private retryDelayMs: number = 1000; // 1-second delay
   useLLMChunk = true;
   currentlySubscribedRunId: string | null = null;
+
+  // Session resilience
+  private sessionManager: SessionManager;
+  isReconnecting: boolean = false;
+  reconnectRunId: string | null = null;
+  private lastEventId: number = 0;
 
   // ViewModel/Sync state
   flowStructure: FlowViewModel | null = null;
@@ -487,7 +553,7 @@ class SessionStore {
   timelineViewModel: TimelineViewModel | null = null;
   streamingContent = new Map<string, string>();
   viewErrors = new Map<string, string | null>();
-  
+
   // New: Track if waiting for a new ViewModel
   isWaitingForNewViewModel: boolean = false;
 
@@ -519,6 +585,26 @@ class SessionStore {
   workModules: Record<string, Record<string, WorkModuleUpdated['data']['module']>> = {};
 
   constructor() {
+    // Initialize session manager with callbacks
+    this.sessionManager = getSessionManager({
+      onSessionExpired: () => {
+        console.warn('[SessionStore] Session expired - clearing state');
+        runInAction(() => {
+          this.error = 'Session expired. Please refresh the page.';
+          this.isConnected = false;
+        });
+        this.cleanup();
+      },
+      onReconnectNeeded: (runId: string) => {
+        console.log('[SessionStore] Reconnection needed for run:', runId);
+        this.attemptReconnection(runId);
+      },
+      onHeartbeatFailed: () => {
+        console.warn('[SessionStore] Heartbeat failed - attempting reconnection');
+        this.handleDisconnection();
+      },
+    });
+
     makeAutoObservable(this, {
         chatHistoryTurns: computed,
         activityStreamTurns: computed
@@ -563,8 +649,8 @@ class SessionStore {
   get chatHistoryTurns(): Turn[] {
     if (!this.turns) return [];
     // Only include 'User' and 'Partner' turns
-    return this.turns.filter(turn => 
-        turn.agent_info?.agent_id.includes('User') || 
+    return this.turns.filter(turn =>
+        turn.agent_info?.agent_id.includes('User') ||
         turn.agent_info?.agent_id.includes('Partner')
     );
   }
@@ -572,8 +658,8 @@ class SessionStore {
   get activityStreamTurns(): Turn[] {
     if (!this.turns) return [];
     // Exclude 'User' and 'Partner' turns
-    return this.turns.filter(turn => 
-        !turn.agent_info?.agent_id.includes('User') && 
+    return this.turns.filter(turn =>
+        !turn.agent_info?.agent_id.includes('User') &&
         !turn.agent_info?.agent_id.includes('Partner')
     );
   }
@@ -615,7 +701,7 @@ class SessionStore {
 
   get isSystemRunning() {
     // Based on the new Turn model, we check if there are any running Turns
-    return this.ws?.readyState === WebSocket.OPEN && 
+    return this.ws?.readyState === WebSocket.OPEN &&
            this.turns.some(turn => turn.status === 'running');
   }
 
@@ -629,7 +715,7 @@ class SessionStore {
     const isRunning = runTurns.some(t => t.status === 'running');
 
     // If any Turn's LLM interaction is in progress, it is considered that streaming output has started
-    const isStreamStarted = runTurns.some(t => 
+    const isStreamStarted = runTurns.some(t =>
       t.agent_info.agent_id.includes('Partner') && t.llm_interaction?.status === 'running'
     );
 
@@ -644,25 +730,46 @@ class SessionStore {
 
     runInAction(() => {
         this.isConnecting = true;
+        this.error = null;
     });
 
     try {
-        const data = await ProjectService.createSession();
-        
+        // Use session manager to get or create session (handles reconnection)
+        const { tokens, isReconnect, reconnectInfo } = await this.sessionManager.getOrCreateSession();
+
         runInAction(() => {
-            this.sessionId = data.session_id;
+            this.sessionId = tokens.session_id;
+            this.isReconnecting = isReconnect;
+            this.reconnectRunId = reconnectInfo?.runId ?? null;
         });
 
-        await this.connectWebSocket(data.session_id);
+        await this.connectWebSocket(tokens.session_id);
+
+        // If reconnecting, send reconnect message
+        if (isReconnect && reconnectInfo) {
+            console.log('[SessionStore] Sending reconnect message for run:', reconnectInfo.runId);
+            this.sessionManager.sendReconnectMessage(
+                this.ws!,
+                reconnectInfo.runId,
+                reconnectInfo.lastEventId
+            );
+        }
+
+        // Start client heartbeat
+        if (this.ws) {
+            this.sessionManager.startHeartbeat(this.ws);
+        }
 
         runInAction(() => {
             this.isConnected = true;
-            console.log("WebSocket connection established successfully.");
+            console.log("WebSocket connection established successfully.", { isReconnect });
         });
     } catch (error) {
         console.error('Failed to initialize session and connect WebSocket:', error);
         runInAction(() => {
             this.isConnected = false;
+            this.isReconnecting = false;
+            this.reconnectRunId = null;
             // Provide a more user-friendly error message
             if (error instanceof Error && error.message === 'Failed to fetch') {
               this.error = 'Unable to connect to server. Please check your network connection and try again.';
@@ -680,7 +787,7 @@ class SessionStore {
   async connectWebSocket(sessionId: string) {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`${config.ws.url}${config.ws.endpoint}/${sessionId}`);
-      
+
       ws.onopen = () => {
         this.ws = ws;
         resolve(ws);
@@ -693,12 +800,15 @@ class SessionStore {
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        this.error = 'Connection error. Please try again.';
+        runInAction(() => {
+          this.error = 'Connection error. Please try again.';
+        });
         reject(error);
       };
 
-      ws.onclose = () => {
-        this.ws = null;
+      ws.onclose = (event) => {
+        console.log('[SessionStore] WebSocket closed', { code: event.code, reason: event.reason });
+        this.handleDisconnection();
       };
     });
   }
@@ -706,6 +816,77 @@ class SessionStore {
   handleWebSocketMessage(data: WebSocketMessage) {
     // console.log('Received message:', data.type, data);
     switch (data.type) {
+      // --- Session Resilience Messages ---
+      case 'ping': {
+        // Server heartbeat - respond with pong including sync data
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({
+            type: 'pong',
+            timestamp: (data as { timestamp?: string }).timestamp,
+            lastEventId: this.lastEventId,
+            clientTime: Date.now(),
+          }));
+        }
+        break;
+      }
+      case 'heartbeat_ack': {
+        // Handle server acknowledgment of client heartbeat
+        const ack = data as unknown as { timestamp: number; serverTime: string; sessionValid: boolean };
+        this.sessionManager.handleHeartbeatAck(ack);
+        break;
+      }
+      case 'reconnected': {
+        // Successfully reconnected to a run
+        const reconnectData = data as unknown as {
+          run_id: string;
+          run_status: string;
+          buffered_events?: unknown[];
+          events_replayed?: number;
+          message?: string;
+        };
+        console.log('[SessionStore] Reconnected to run:', reconnectData);
+        runInAction(() => {
+          this.isReconnecting = false;
+          this.reconnectRunId = null;
+          // Subscribe to views for the reconnected run
+          if (reconnectData.run_id) {
+            this._subscribeToAllViews(reconnectData.run_id);
+          }
+        });
+        break;
+      }
+      case 'reconnect_error': {
+        const errorData = data as unknown as { error: string; run_id?: string };
+        console.error('[SessionStore] Reconnect failed:', errorData.error);
+        runInAction(() => {
+          this.isReconnecting = false;
+          this.reconnectRunId = null;
+          // Clear stored run info since reconnection failed
+          this.sessionManager.updateRunInfo('', undefined);
+        });
+        break;
+      }
+      case 'replay_start': {
+        console.log('[SessionStore] Event replay starting');
+        break;
+      }
+      case 'replay_end': {
+        const replayData = data as unknown as { run_id: string; events_replayed: number };
+        console.log('[SessionStore] Event replay complete:', replayData.events_replayed, 'events');
+        break;
+      }
+      case 'session_expired': {
+        const expiredData = data as unknown as { reason: string };
+        console.warn('[SessionStore] Session expired:', expiredData.reason);
+        runInAction(() => {
+          this.error = 'Session expired. Please refresh the page.';
+          this.isConnected = false;
+        });
+        this.cleanup();
+        break;
+      }
+      // --- End Session Resilience Messages ---
+
       case 'turns_sync': {
         runInAction(() => {
             this.turns = data.data.turns;
@@ -731,6 +912,15 @@ class SessionStore {
             this.runCreationPromises.delete(request_id);
         }
         this.runCreatedCounter += 1;
+        // Track the run for reconnection
+        this.sessionManager.updateRunInfo(run_id);
+        break;
+      }
+      case 'run_stopped': {
+        const { run_id, reason } = (data as RunStopped).data;
+        console.log(`Run ${run_id} stopped: ${reason}`);
+        // Run stays in memory on backend - no frontend tracking needed
+        // User can immediately send a new message to continue
         break;
       }
       case 'error': {
@@ -746,7 +936,7 @@ class SessionStore {
         console.log('View Model Update Received:', data);
         const { view_name, model } = (data as ViewModelUpdate).data;
         this.viewErrors.set(view_name, null);
-        
+
         // Reset waiting state (first ViewModel has arrived)
         if (this.isWaitingForNewViewModel) {
           runInAction(() => {
@@ -754,11 +944,11 @@ class SessionStore {
             console.log('🎯 First ViewModel received, clearing waiting state');
           });
         }
-        
+
         if (view_name === 'flow_view') {
           // Do not update turns from here anymore
           const newFlow = model as FlowViewModel;
-          
+
           // Create a map of stream IDs from the current (old) flow structure
           // to preserve content of completed streams.
           const oldStreamIds = new Map<string, string>();
@@ -783,7 +973,7 @@ class SessionStore {
                   }
               }
           });
-          
+
           this.flowStructure = newFlow;
         } else if (view_name === 'kanban_view') {
           this.kanbanViewModel = model as KanbanViewModel;
@@ -1031,12 +1221,12 @@ class SessionStore {
     this.ws!.send(JSON.stringify(payload));
 
     return new Promise((resolve, reject) => {
-        this.runCreationPromises.set(requestId, { 
+        this.runCreationPromises.set(requestId, {
           resolve: (returnedRunId: string) => {
             this._subscribeToAllViews(returnedRunId);
             resolve(returnedRunId);
           },
-          reject 
+          reject
         });
     });
   }
@@ -1062,7 +1252,7 @@ class SessionStore {
       }
     };
     this.ws!.send(JSON.stringify(payload));
-    
+
     return new Promise((resolve, reject) => {
       this.runCreationPromises.set(requestId, { resolve, reject });
       setTimeout(() => {
@@ -1149,15 +1339,127 @@ class SessionStore {
     return this.flowStructure.nodes.find(n => n.id === nodeId);
   }
 
+  // --- Session Resilience Methods ---
+
+  /**
+   * Handle WebSocket disconnection - attempt reconnection if appropriate.
+   */
+  private handleDisconnection() {
+    runInAction(() => {
+      this.ws = null;
+      this.isConnected = false;
+    });
+
+    // Stop client heartbeat
+    this.sessionManager.stopHeartbeat();
+
+    // Check if we can reconnect
+    const session = this.sessionManager.loadSession();
+    if (session?.runId && session.runId.trim() !== '') {
+      console.log('[SessionStore] Disconnection detected with active run, will attempt reconnection');
+      // Don't clear session - backend has grace period
+      this.attemptReconnection(session.runId);
+    } else {
+      console.log('[SessionStore] Disconnection detected, no active run to reconnect');
+    }
+  }
+
+  /**
+   * Attempt to reconnect to an active run.
+   */
+  private async attemptReconnection(runId: string) {
+    if (!runId || runId.trim() === '') {
+      console.warn('[SessionStore] Cannot reconnect: runId is empty');
+      return;
+    }
+
+    if (this.isReconnecting) {
+      console.log('[SessionStore] Already attempting reconnection');
+      return;
+    }
+
+    runInAction(() => {
+      this.isReconnecting = true;
+      this.reconnectRunId = runId;
+    });
+
+    try {
+      // Check if run is still reconnectable
+      const runStatus = await this.sessionManager.getRunStatus(runId);
+
+      if (!runStatus.can_reconnect) {
+        console.log('[SessionStore] Run is no longer reconnectable:', runStatus);
+        runInAction(() => {
+          this.isReconnecting = false;
+          this.reconnectRunId = null;
+        });
+        return;
+      }
+
+      // Get new session (will reuse fingerprint cookie)
+      const tokens = await this.sessionManager.createSession();
+
+      runInAction(() => {
+        this.sessionId = tokens.session_id;
+      });
+
+      // Connect WebSocket
+      await this.connectWebSocket(tokens.session_id);
+
+      // Send reconnect message
+      const session = this.sessionManager.loadSession();
+      this.sessionManager.sendReconnectMessage(
+        this.ws!,
+        runId,
+        session?.lastEventId
+      );
+
+      // Start client heartbeat
+      if (this.ws) {
+        this.sessionManager.startHeartbeat(this.ws);
+      }
+
+      runInAction(() => {
+        this.isConnected = true;
+        console.log('[SessionStore] Reconnection WebSocket established');
+      });
+    } catch (error) {
+      console.error('[SessionStore] Reconnection failed:', error);
+      runInAction(() => {
+        this.isReconnecting = false;
+        this.reconnectRunId = null;
+        this.error = 'Reconnection failed. Please refresh the page.';
+      });
+    }
+  }
+
+  /**
+   * Update the last event ID for reconnection tracking.
+   */
+  trackEventId(eventId: number) {
+    this.lastEventId = eventId;
+    this.sessionManager.updateLastEventId(eventId);
+  }
+
+  // --- End Session Resilience Methods ---
+
   cleanup() {
     this.stopStreamingProcessor();
+    this.sessionManager.stopHeartbeat();
+    this.sessionManager.stopAutoRefresh();
+
     if (this.ws) {
       console.log('Closing WebSocket connection');
       this.ws.close();
       this.ws = null;
+    }
+
+    runInAction(() => {
       this.isConnected = false;
       this.isConnecting = false;
-    }
+      this.isReconnecting = false;
+      this.reconnectRunId = null;
+    });
   }
   // endregion
 }

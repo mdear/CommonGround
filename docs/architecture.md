@@ -126,3 +126,14 @@ This section describes the step-by-step lifecycle of a typical research task, li
     1.  `{run_id}.json`: A complete, serializable snapshot of the entire `RunContext`, saved periodically.
     2.  `{run_name}.iic`: A lightweight file containing core metadata (ID, name, creation date) for quick browsing and identification.
     A `project.iic` file in each project's root directory serves as a fast-lookup index for all runs within it.
+### 4.8 Budget-Aware Content Inheritance
+*   **Location**: `utils/content_selection.py`, `nodes/custom_nodes/dispatcher_node.py`
+*   **Problem**: When Associates inherit context from completed work modules via `inherit_messages_from`, unbounded message injection can cause new agents to exceed their context budget at birth.
+*   **Mechanism**: A two-tier content selection strategy enforces budget limits:
+    1.  **Budget Computation**: `(target_context_limit × 0.40) ÷ num_sources` allocates fair share per source module.
+    2.  **Tier 1 Selection**: Use `deliverables.primary_summary` (LLM-generated summary from finish_flow) if it exists and fits budget.
+    3.  **Tier 2 Selection**: Fall back to newest-first message selection with **hydration before measurement** to ensure accurate sizing.
+*   **Key Design Decision**: Knowledge Base tokens in archived messages are expanded (hydrated) BEFORE size measurement, not after. This prevents post-selection expansion from exceeding budget limits.
+*   **Integration Point**: Content selection happens in `dispatcher_node._preselect_inherited_content()` BEFORE the HandoverService is called, ensuring budget compliance at dispatch time.
+
+See [Context Budget Management Architecture](architecture/context-budget-management.md) for detailed design documentation.

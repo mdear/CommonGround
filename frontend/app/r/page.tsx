@@ -2,7 +2,7 @@
 
 import { useSearchParams } from 'next/navigation';
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { reaction } from 'mobx';
+import { reaction, runInAction } from 'mobx';
 import { observer } from 'mobx-react-lite';
 import { useLocalObservable } from 'mobx-react-lite';
 import { selectionStore } from '@/app/stores/selectionStore';
@@ -44,8 +44,10 @@ const RunPageLoader = observer(() => {
   useEffect(() => {
     if (runId) {
       setIsInitialized(false);
-      sessionStore.error = null;
-      sessionStore.isResuming = false;
+      runInAction(() => {
+        sessionStore.error = null;
+        sessionStore.isResuming = false;
+      });
     }
   }, [runId]);
 
@@ -53,7 +55,7 @@ const RunPageLoader = observer(() => {
   useEffect(() => {
     if (runId && !isInitialized && !projectsLoading && projects.length > 0) {
       const foundFile = findRunInProjects(runId, projects);
-      
+
       if (foundFile) {
         selectionStore.setSelectedFile(foundFile);
       } else {
@@ -64,17 +66,17 @@ const RunPageLoader = observer(() => {
           projectName: 'Default Project'
         });
       }
-      
+
       setIsInitialized(true);
     }
   }, [runId, projects, isInitialized, projectsLoading]);
-  
-  const chatHistoryTurnsForRun = useMemo(() => 
+
+  const chatHistoryTurnsForRun = useMemo(() =>
     sessionStore.chatHistoryTurns.filter(t => t.run_id === runId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sessionStore.chatHistoryTurns, runId]
   );
-  
+
   // Resume session
   useEffect(() => {
     const selectedFile = selectionStore.selectedFile;
@@ -250,4 +252,4 @@ function findRunInProjects(runId: string, projects: { project: { project_id: str
     }
   }
   return null;
-} 
+}

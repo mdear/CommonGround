@@ -74,7 +74,7 @@ def tool_registry(
         from pocketflow import BaseNode
         if not (inspect.isclass(cls) and issubclass(cls, BaseNode)):
             raise TypeError(f"@tool_registry can only be applied to subclasses of BaseNode, not {cls}")
-        
+
         actual_toolset_name = toolset_name if toolset_name else name
 
         tool_info = {
@@ -91,16 +91,16 @@ def tool_registry(
             "source_uri_field_in_output": source_uri_field_in_output,
             "title_field_in_output": title_field_in_output
         }
-        
+
         if name in _TOOL_REGISTRY:
             logger.warning("tool_registration_overwrite", extra={"description": "Tool name already exists and will be overwritten", "tool_name": name})
         _TOOL_REGISTRY[name] = tool_info
-        
+
         cls._tool_info = tool_info
-        
+
         logger.debug("tool_registered", extra={"description": "Registered tool", "tool_name": name, "toolset_name": actual_toolset_name, "ends_flow": ends_flow})
         return cls
-    
+
     return decorator
 
 def get_registered_tools():
@@ -128,9 +128,9 @@ def get_tools_by_toolset_names(toolset_names: List[str]) -> List[Dict]:
     """
     if not toolset_names:
         return []
-    
+
     toolset_names_set = set(toolset_names)
-    
+
     return [
         tool_info for tool_info in get_registered_tools()
         if tool_info.get("toolset_name") in toolset_names_set
@@ -139,7 +139,7 @@ def get_tools_by_toolset_names(toolset_names: List[str]) -> List[Dict]:
 def get_all_toolsets_with_tools() -> Dict[str, List[Dict]]:
     """
     Gets all toolsets and their associated tool information.
-    
+
     Returns:
         A dictionary where keys are toolset names and values are lists of
         tool information for that toolset.
@@ -151,9 +151,9 @@ def get_all_toolsets_with_tools() -> Dict[str, List[Dict]]:
         toolset_name = tool_info.get("toolset_name", tool_info["name"])
         if toolset_name not in toolsets_data:
             toolsets_data[toolset_name] = []
-        
+
         final_description_for_client = tool_info.get("description", "")
-        
+
         toolsets_data[toolset_name].append({
             "name": tool_info["name"],
             "description": final_description_for_client,
@@ -165,28 +165,28 @@ def format_tools_for_llm_api(tools_list: List[Dict]) -> List[Dict]:
     """
     Formats a list of tools into the format required by the LLM API,
     appending toolset information to the description and sanitizing the schema.
-    
+
     Args:
         tools_list: A list of tool information dictionaries.
-    
+
     Returns:
         A list of tools formatted for the LLM API.
     """
     api_tools = []
     for tool_info in tools_list:
         description = tool_info.get("description", "")
-        
+
         toolset_name = tool_info.get("toolset_name", tool_info["name"])
         description_with_toolset = f"{description} (Belongs to toolset: '{toolset_name}')"
-            
+
         parameters = tool_info.get("parameters", {})
         if not isinstance(parameters, dict):
              logger.warning("tool_invalid_parameters", extra={"description": "Tool has non-dict parameters; using empty object", "tool_name": tool_info.get('name', 'unknown'), "parameters": str(parameters)})
              parameters = {"type": "object", "properties": {}}
-        
+
         # Sanitize the schema to remove all custom fields starting with 'x-' before sending to the API
         sanitized_parameters = _sanitize_schema_for_api(parameters)
-        
+
         api_tool = {
             "type": "function",
             "function": {
@@ -201,30 +201,30 @@ def format_tools_for_llm_api(tools_list: List[Dict]) -> List[Dict]:
 def format_tools_for_prompt(tools_list) -> str:
     """
     Formats a list of tools into a string for system prompts.
-    
+
     Args:
         tools_list: A list of tool information dictionaries.
-    
+
     Returns:
         A string describing the tools for a system prompt.
     """
     formatted_text = "### Registered Tools\n\n"
-    
+
     for tool in tools_list:
         name = tool.get("name", "")
         description = tool.get("description", "")
-        
+
         formatted_text += f"**{name}**: {description}\n\n"
-    
+
     return formatted_text
 
 def format_tools_for_prompt_by_toolset(tools_by_toolset: Dict[str, List[Dict]]) -> str:
     """
     Formats a dictionary of tools grouped by toolset into a prompt string.
-    
+
     Args:
         tools_by_toolset: A dictionary of toolsets and their tools.
-    
+
     Returns:
         A string describing the tools, grouped by toolset, for a system prompt.
     """
@@ -241,7 +241,7 @@ def format_tools_for_prompt_by_toolset(tools_by_toolset: Dict[str, List[Dict]]) 
         for tool_info in tools_in_set:
             name = tool_info.get("name", "")
             description = tool_info.get("description", "")
-            
+
             prompt_parts.append(f"*   **{name}**: {description}\n")
         prompt_parts.append("\n")
 
@@ -250,10 +250,10 @@ def format_tools_for_prompt_by_toolset(tools_by_toolset: Dict[str, List[Dict]]) 
 def format_simplified_tools_for_prompt_by_toolset(tools_by_toolset: Dict[str, List[Dict]]) -> str:
     """
     Formats tools grouped by toolset into a simplified prompt string (no parameters).
-    
+
     Args:
         tools_by_toolset: A dictionary of toolsets and their tools.
-    
+
     Returns:
         A simplified Markdown list of tools for a system prompt.
     """
@@ -270,7 +270,7 @@ def format_simplified_tools_for_prompt_by_toolset(tools_by_toolset: Dict[str, Li
         for tool_info in tools_in_set:
             name = tool_info.get("name", "")
             description = tool_info.get("description", "")
-            
+
             prompt_parts.append(f"*   **{name}**: {description}\n")
         prompt_parts.append("\n")
 
@@ -357,7 +357,7 @@ def _cache_mcp_tools_to_yaml():
     for tool_name, tool_info in _TOOL_REGISTRY.items():
         if tool_info.get("implementation_type") == "native_mcp":
             description = tool_info.get("description", "No description available.")
-            
+
             mcp_tools_to_cache[tool_name] = description
 
     if not mcp_tools_to_cache:
@@ -412,7 +412,7 @@ async def initialize_registry(discovery_session_group: Optional[ClientSessionGro
                     if module_name in sys.modules:
                         logger.debug("module_force_reload", extra={"description": "Removing module from sys.modules to force reload", "module_name": module_name})
                         del sys.modules[module_name]
-                    
+
                     importlib.import_module(module_name)
                     logger.debug("custom_tool_module_imported", extra={"description": "Successfully imported custom tool module", "module_name": module_name})
                 except ImportError as e:
@@ -433,7 +433,7 @@ async def initialize_registry(discovery_session_group: Optional[ClientSessionGro
             protocol_schema = HandoverService.get_protocol_schema(protocol_name)
             if protocol_schema:
                 # Deep copy to avoid modifying the original object
-                merged_params = copy.deepcopy(tool_info["parameters"])                
+                merged_params = copy.deepcopy(tool_info["parameters"])
 
                 # Heuristic: Try to find a nested 'items' for array-based tools (like dispatch_submodules)
                 # This allows handover parameters to be defined once in YAML and merged into the correct location.
@@ -443,12 +443,12 @@ async def initialize_registry(discovery_session_group: Optional[ClientSessionGro
                         if isinstance(prop_value, dict) and prop_value.get('type') == 'array' and 'items' in prop_value and isinstance(prop_value.get('items'), dict) and 'properties' in prop_value['items']:
                             target_schema_for_merge = prop_value['items']
                             logger.debug("handover_protocol_nested_array_found", extra={"description": "Found nested array, will merge handover params into its 'items' schema"})
-                            break 
+                            break
 
                 # Merge properties from protocol into the target schema
                 target_schema_for_merge.setdefault("properties", {}).update(
                     protocol_schema.get("properties", {})
-                )                
+                )
                 # Merge required fields from protocol into the target schema
                 req_list = target_schema_for_merge.setdefault("required", [])
                 req_set = set(req_list)
@@ -466,7 +466,7 @@ async def initialize_registry(discovery_session_group: Optional[ClientSessionGro
 
         for session in discovery_session_group.sessions:
             server_name = getattr(session, 'server_name_from_config', None)
-            
+
             if not server_name:
                 logger.warning("mcp_session_unnamed_skip", extra={"description": "Found a connected but unnamed MCP session, skipping tool discovery", "session": str(session)})
                 continue
@@ -499,36 +499,151 @@ async def initialize_registry(discovery_session_group: Optional[ClientSessionGro
 
     return _TOOL_REGISTRY
 
+def get_all_mcp_server_toolset_names() -> List[str]:
+    """
+    Returns a list of all unique MCP server names that have registered tools.
+    This enables auto-discovery of available MCP toolsets.
+    """
+    mcp_server_names = set()
+    for tool_info in _TOOL_REGISTRY.values():
+        if tool_info.get("implementation_type") == "native_mcp":
+            server_name = tool_info.get("mcp_server_name")
+            if server_name:
+                mcp_server_names.add(server_name)
+    return sorted(list(mcp_server_names))
+
+
+def get_mcp_servers_by_category(category: str) -> List[str]:
+    """
+    Returns a list of ENABLED MCP server names that belong to the specified category.
+
+    Categories are defined in mcp.json via the 'category' field on each server.
+    Only servers that are both enabled AND have an EXPLICIT matching category are returned.
+
+    STRICT MATCHING: Servers without an explicit 'category' field in mcp.json
+    default to 'uncategorized' and will NOT be matched by this function for
+    'google_related' or 'user_specified' queries.
+
+    Standard categories:
+    - "google_related": Google/Gemini related servers (e.g., "G" for Gemini CLI)
+    - "user_specified": User-defined domain-specific servers (must be explicitly set)
+    - "uncategorized": Default for servers without explicit category (not matched by category toolsets)
+
+    Args:
+        category: The category name to filter by
+
+    Returns:
+        List of server names that are enabled and explicitly match the category
+    """
+    from agent_core.config.app_config import get_mcp_server_categories
+
+    mcp_server_categories = get_mcp_server_categories()
+    matching_servers = []
+    registered_mcp_servers = set(get_all_mcp_server_toolset_names())
+
+    for server_name, server_info in mcp_server_categories.items():
+        if (server_info.get("category") == category and
+            server_info.get("enabled", False) and
+            server_name in registered_mcp_servers):
+            matching_servers.append(server_name)
+
+    logger.debug("mcp_servers_by_category", extra={
+        "category": category,
+        "matching_servers": matching_servers,
+        "all_categories": dict(mcp_server_categories)
+    })
+    return sorted(matching_servers)
+
+
+def expand_toolset_category(toolset_name: str) -> List[str]:
+    """
+    Expands a toolset category name into actual MCP server names.
+
+    Special category toolset names (resolved dynamically based on mcp.json):
+    - "*" or "all_mcp_servers": All registered (and enabled) MCP server toolsets
+    - "all_google_related_mcp_servers": Only enabled servers with EXPLICIT category="google_related"
+    - "all_user_specified_mcp_servers": Only enabled servers with EXPLICIT category="user_specified"
+
+    IMPORTANT: Category matching is STRICT. Servers without an explicit 'category'
+    field in mcp.json default to 'uncategorized' and will NOT be matched by
+    'all_google_related_mcp_servers' or 'all_user_specified_mcp_servers'.
+
+    To add a new user server that should be included in 'all_user_specified_mcp_servers':
+    1. Add the server to mcp.json
+    2. Set "category": "user_specified" explicitly
+    3. Set "enabled": true
+
+    Args:
+        toolset_name: The toolset name, which may be a category
+
+    Returns:
+        List of actual server names, or [toolset_name] if not a category
+    """
+    if toolset_name in ("*", "all_mcp_servers"):
+        return get_all_mcp_server_toolset_names()
+    elif toolset_name == "all_google_related_mcp_servers":
+        return get_mcp_servers_by_category("google_related")
+    elif toolset_name == "all_user_specified_mcp_servers":
+        return get_mcp_servers_by_category("user_specified")
+    else:
+        return [toolset_name]
+
+
 def get_tools_for_profile(loaded_profile: Dict, context: Dict, agent_id: str) -> List[Dict]:
     """
     Gets the list of tools available to an agent based on its loaded profile
     and the current context. Tool access is governed by the profile's
     `tool_access_policy` and any overrides from the Principal.
+
+    Special toolset names (category-based, resolved dynamically):
+    - "*" or "all_mcp_servers": All registered (and enabled) MCP server toolsets
+    - "all_google_related_mcp_servers": Only enabled servers with category="google_related"
+    - "all_user_specified_mcp_servers": Only enabled servers with category="user_specified"
     """
     sub_context_state = context["state"]
     profile_id = loaded_profile.get("profile_id", "UnknownProfile")
-    
+
     logger.debug("agent_tools_profile_evaluation", extra={"description": "Determining tools based on profile's tool_access_policy", "agent_id": agent_id, "profile_id": profile_id})
-    
+
     is_associate_agent = "Associate" in agent_id
-    
+
     final_tools_list = []
     processed_tool_names = set()
 
     tool_access_policy = loaded_profile.get("tool_access_policy", {})
     profile_allowed_toolsets = tool_access_policy.get("allowed_toolsets", [])
     profile_allowed_individual_tools = tool_access_policy.get("allowed_individual_tools", [])
-    logger.debug("agent_profile_tool_policy", extra={"description": "Profile's tool access policy", "agent_id": agent_id, "profile_id": profile_id, "allowed_toolsets": profile_allowed_toolsets, "allowed_individual_tools": profile_allowed_individual_tools})
+
+    # Expand category-based toolsets (e.g., "all_user_specified_mcp_servers" -> ["Seats", ...])
+    # This is explicit opt-in: profiles must specify which categories they want access to
+    expanded_toolsets = []
+    for ts in profile_allowed_toolsets:
+        expanded = expand_toolset_category(ts)
+        if expanded != [ts]:
+            logger.info("expanded_toolset_category", extra={
+                "description": "Expanded toolset category to actual servers",
+                "agent_id": agent_id,
+                "category": ts,
+                "expanded_to": expanded
+            })
+        expanded_toolsets.extend(expanded)
+
+    profile_allowed_toolsets = expanded_toolsets
+
+    logger.debug("agent_profile_tool_policy", extra={"description": "Profile's tool access policy (expanded)", "agent_id": agent_id, "profile_id": profile_id, "allowed_toolsets": profile_allowed_toolsets, "allowed_individual_tools": profile_allowed_individual_tools})
 
     # Check for Principal-specified toolset override for Associates from the state within the SubContext
     principal_override_toolsets_for_associate = sub_context_state.get("allowed_toolsets")
 
-    candidate_tool_sources = [] 
+    candidate_tool_sources = []
 
     if is_associate_agent and principal_override_toolsets_for_associate is not None:
         logger.info("agent_principal_toolset_override", extra={"description": "Using Principal-specified toolsets override", "agent_id": agent_id, "profile_id": profile_id, "override_toolsets": principal_override_toolsets_for_associate})
-        # If principal_override_toolsets_for_associate is an empty list [], it means NO registry tools.
-        for toolset_name in principal_override_toolsets_for_associate:
+        # Expand category-based toolsets in override too
+        expanded_override = []
+        for ts in principal_override_toolsets_for_associate:
+            expanded_override.extend(expand_toolset_category(ts))
+        for toolset_name in expanded_override:
             tools_in_set = get_tools_by_toolset_names([toolset_name])
             logger.debug("agent_override_toolset_tools", extra={"description": "Tools found for overridden toolset", "agent_id": agent_id, "profile_id": profile_id, "toolset_name": toolset_name, "tool_names": [t['name'] for t in tools_in_set]})
             candidate_tool_sources.append( (f"toolset '{toolset_name}' from Principal override", tools_in_set) )
@@ -541,7 +656,7 @@ def get_tools_for_profile(loaded_profile: Dict, context: Dict, agent_id: str) ->
                 tools_in_set = get_tools_by_toolset_names([toolset_name])
                 logger.debug("agent_toolset_tools_found", extra={"description": "Tools found for toolset", "agent_id": agent_id, "profile_id": profile_id, "toolset_name": toolset_name, "tool_names": [t['name'] for t in tools_in_set]})
                 candidate_tool_sources.append( (f"toolset '{toolset_name}' from profile", tools_in_set) )
-        
+
         if profile_allowed_individual_tools:
             logger.debug("agent_individual_tools_processing", extra={"description": "Processing profile's allowed_individual_tools", "agent_id": agent_id, "profile_id": profile_id, "allowed_individual_tools": profile_allowed_individual_tools})
             individual_tool_infos = []
@@ -554,12 +669,12 @@ def get_tools_for_profile(loaded_profile: Dict, context: Dict, agent_id: str) ->
                     logger.warning("agent_individual_tool_not_found", extra={"description": "Individual tool from profile not found in registry", "agent_id": agent_id, "profile_id": profile_id, "tool_name": tool_name})
             if individual_tool_infos:
                 candidate_tool_sources.append( (f"individual tools from profile", individual_tool_infos) )
-    
+
     logger.debug("agent_candidate_tool_sources", extra={"description": "Candidate tool sources", "agent_id": agent_id, "profile_id": profile_id, "sources": [(s[0], [t['name'] for t in s[1]]) for s in candidate_tool_sources]})
 
     # Process all candidate tools, ensuring no duplicates. Scope filtering is removed.
     for source_desc, tools_from_source in candidate_tool_sources:
-        for tool_info in tools_from_source: 
+        for tool_info in tools_from_source:
             tool_name = tool_info["name"]
             if tool_name not in processed_tool_names:
                 # Scope check removed. If a tool is in candidate_tool_sources, it's considered applicable based on profile.
@@ -569,7 +684,7 @@ def get_tools_for_profile(loaded_profile: Dict, context: Dict, agent_id: str) ->
             # else: logger.debug(f"Tool '{tool_name}' from {source_desc} already processed.")
 
     # Client-declared MCP tools are NO LONGER PROCESSED HERE as per V5 plan.
-    
+
     logger.debug("agent_final_tools_determined", extra={"description": "Final applicable tools determined", "agent_id": agent_id, "profile_id": profile_id, "tool_count": len(final_tools_list), "tool_names": [t['name'] for t in final_tools_list]})
     return final_tools_list
 
@@ -589,16 +704,19 @@ def connect_tools_to_node(node, context: Optional[Dict] = None):
     agent_operational_scope_for_log = "principal" if "Principal" in node.agent_id else "agent" if hasattr(node, 'agent_id') else "unknown_node_type"
     node_identifier_for_log = node.agent_id if hasattr(node, 'agent_id') else node.__class__.__name__
     logger.debug("node_tool_connection_begin", extra={"description": "Connecting tools to node. Tool availability determined by Profile", "node_identifier": node_identifier_for_log, "node_class": node.__class__.__name__, "agent_scope": agent_operational_scope_for_log})
-    
-    from pocketflow import Flow, AsyncFlow, Node, AsyncNode 
+
+    from pocketflow import Flow, AsyncFlow, Node, AsyncNode
     from ..nodes.mcp_proxy_node import MCPProxyNode
-    from ..nodes.base_agent_node import AgentNode 
+    from ..nodes.base_agent_node import AgentNode
 
     tools_to_connect_definitions: List[Dict] = []
     if isinstance(node, AgentNode):
-        if not node.loaded_profile: 
+        if not node.loaded_profile:
             logger.error("agent_node_profile_not_set", extra={"description": "AgentNode profile not set prior to connect_tools_to_node. This indicates an issue with AgentNode initialization. No tools will be connected", "agent_id": node.agent_id})
-            return {} 
+            return {}
+        if context is None:
+            logger.error("agent_node_context_required", extra={"description": "Context is required for connect_tools_to_node but was None. No tools will be connected", "agent_id": node.agent_id})
+            return {}
         # Get the definitive list of tool definitions for this AgentNode instance based on its profile.
         # Pass the context object to get_tools_for_profile
         tools_to_connect_definitions = get_tools_for_profile(node.loaded_profile, context, node.agent_id)
@@ -616,28 +734,28 @@ def connect_tools_to_node(node, context: Optional[Dict] = None):
         for tool_info in tools_to_connect_definitions:
             name = tool_info["name"]
             impl_type = tool_info.get("implementation_type", "internal") # Default to "internal"
-            
+
             # For "internal" type, node_class should be in tool_info from @tool_registry decorator
             # For "internal_profile_agent", node_class is always AgentNode.
             # For "native_mcp", node_class is MCPProxyNode.
-            
+
             node_class_from_registry = tool_info.get("node_class") # This is set for "internal" type by decorator
             ends_flow_tool = tool_info.get("ends_flow", False)
             action_name = name # PocketFlow action is the tool name
-            
+
             logger.debug("tool_connection_attempt", extra={"description": "Attempting to connect tool", "tool_name": name, "implementation_type": impl_type, "ends_flow": ends_flow_tool})
-                
+
             node_instance = None
-            
+
             if impl_type == "internal":
                 if node_class_from_registry:
                     try:
                         if issubclass(node_class_from_registry, AgentNode):
                              logger.error("tool_invalid_agent_node_class", extra={"description": "Tool (impl_type 'internal') has AgentNode as its class. It should be 'internal_profile_agent'. Skipping", "tool_name": name})
                              continue
-                        
+
                         if issubclass(node_class_from_registry, (Flow, AsyncFlow)):
-                            node_instance = node_class_from_registry() 
+                            node_instance = node_class_from_registry()
                         elif issubclass(node_class_from_registry, (Node, AsyncNode)):
                             node_instance = node_class_from_registry(max_retries=tool_info.get("max_retries",1), wait=tool_info.get("wait",1))
                         else:
@@ -648,10 +766,10 @@ def connect_tools_to_node(node, context: Optional[Dict] = None):
                     except Exception as e:
                         logger.error("internal_tool_node_instantiation_error", extra={"description": "Error instantiating 'internal' tool node", "tool_name": name, "node_class": node_class_from_registry.__name__, "error": str(e)}, exc_info=True)
                         continue
-                else: 
+                else:
                     logger.warning("internal_tool_missing_node_class", extra={"description": "'internal' tool is missing node_class definition in registry. Skipping", "tool_name": name})
                     continue
-            
+
             elif impl_type == "native_mcp":
                 server_name = tool_info.get("mcp_server_name")
                 original_name = tool_info.get("original_name")
@@ -669,7 +787,7 @@ def connect_tools_to_node(node, context: Optional[Dict] = None):
                         max_retries=3,
                         wait=1
                     )
-                    
+
                     tool_nodes[name] = node_instance
                     logger.debug("mcp_proxy_node_instantiated", extra={"description": "Instantiated MCPProxyNode for tool", "unique_name": unique_name, "original_name": original_name, "server_name": server_name})
                 except Exception as e:
@@ -678,15 +796,15 @@ def connect_tools_to_node(node, context: Optional[Dict] = None):
             else:
                 logger.warning("tool_unknown_implementation_type", extra={"description": "Tool has unknown implementation type", "tool_name": name, "implementation_type": impl_type})
                 continue
-                
+
             if node_instance:
                 try:
                     if not hasattr(node, 'successors'):
                         setattr(node, 'successors', {})
-                    
+
                     node.next(node_instance, action=action_name)
                     logger.debug("tool_node_connected", extra={"description": "Connected tool node", "source_node": node.__class__.__name__, "action_name": action_name, "target_node": node_instance.__class__.__name__})
-                    
+
                     if not ends_flow_tool:
                         if not hasattr(node_instance, 'successors'):
                             setattr(node_instance, 'successors', {})
@@ -697,9 +815,9 @@ def connect_tools_to_node(node, context: Optional[Dict] = None):
 
                 except Exception as e:
                     logger.error("tool_node_connection_error", extra={"description": "Error connecting nodes for tool", "tool_name": name, "error": str(e)}, exc_info=True)
-                
+
     except Exception as e:
         logger.error("tool_connection_general_error", extra={"description": "General error during tool connection for node", "node_identifier": node_identifier_for_log, "error": str(e)}, exc_info=True)
-    
+
     logger.debug("node_tool_connection_complete", extra={"description": "Finished connecting tools for node", "node_identifier": node_identifier_for_log, "connected_tool_count": len(tool_nodes)})
     return tool_nodes

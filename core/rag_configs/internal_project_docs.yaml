@@ -32,10 +32,10 @@ meta_table:
   text_column: "chunk_text"
   # Column name for storing tags/keywords, must be of type VARCHAR[].
   tags_column: "tags"
-  
+
   # Defines which columns to return in search results.
   # This helps control the amount of information returned to the Agent.
-  retrieval_columns: 
+  retrieval_columns:
     - "id"
     - "doc_id"
     - "url"
@@ -60,18 +60,18 @@ embedding_table:
   # For writable data sources, a single string (single column) is recommended, as process_pending_embeddings
   # generates embeddings for only one model at a time.
   embedding_column: "embedding_vector"
-  
+
   # Specifies the model used to generate embeddings.
-  # "jina-api": Indicates the use of Jina's online API service.
-  # It can also be a Hugging Face path for a local model, e.g., "jinaai/jina-embeddings-v3-base-zh".
+  # Options: "jina-api" for Jina's online API service, or a Hugging Face path for a local model.
+  # Example HuggingFace models: "jinaai/jina-embeddings-v3-base-zh", "Snowflake/snowflake-arctic-embed-m-v2.0"
   emb_model_id: "jina-api"
-  
+
   # Matryoshka Relevant Dimensions (MRL) - the target dimension for the embedding vector.
   # For MRL models that require truncation or processing, the final dimension is specified here.
   # For non-MRL models, this is usually ignored, but it's best to match the model's output dimension.
   # Jina v3 outputs 1024 dimensions, but MRL to 128 or 256 is generally recommended.
   mrl_dims: 128
-  
+
   # Specifies the embedding task type for different types of text, which is required for some models (like Jina, BGE).
   # Used when indexing documents/passages.
   passage_task_type: "retrieval.passage"

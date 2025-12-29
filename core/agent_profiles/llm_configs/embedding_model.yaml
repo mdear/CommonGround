@@ -1,14 +1,22 @@
+# ================================================================
+# DEPRECATED / UNUSED CONFIG
+# ================================================================
+# This config file is NOT currently used by the system.
+# The RAG embedding model is configured directly in rag_configs/*.yaml
+# via the `emb_model_id` field (currently set to "jina-api").
+#
+# This file is retained for potential future use if the embedding
+# configuration is migrated to the llm_config system.
+# ================================================================
+
 name: embedding_model
 base_llm_config: base_default_llm
 type: llm_config
-description_for_human: "LLM config for text embedding models used in RAG. NOTE: The RAG feature is a work-in-progress and not yet a well-tested effort."
+description_for_human: "[UNUSED] LLM config for text embedding models. See rag_configs/*.yaml for actual embedding configuration."
 
 config:
   model:
     _type: "from_env"
     var: "EMBEDDING_LLM"
-    default: "gemini/gemini-embedding-exp-03-07" # The model currently used in your code
+    default: "gemini/gemini-embedding-exp-03-07"  # OUTDATED - actual system uses jina-api
     required: false
-  # Non-generic parameters like embedding_dims can be kept in the code,
-  # as it is closely related to the vector store configuration.
-  # Alternatively, it could be defined here and read by the code. For now, we only focus on the model itself.

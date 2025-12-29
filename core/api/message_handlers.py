@@ -24,6 +24,8 @@ from agent_profiles.loader import get_global_active_profile_by_logical_name_copy
 from agent_core.events.event_triggers import trigger_view_model_update # For view model updates
 from agent_core.nodes.custom_nodes.stage_planner_node import _apply_work_module_actions # For direct work module management
 from agent_core.utils.serialization import get_serializable_run_snapshot # New import
+# Import connection manager for resilient connection handling
+from api.connection_manager import connection_manager
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +65,7 @@ async def _apply_profile_updates_in_run_context(run_context: Dict, profile_updat
         if not action or not profile_logical_name:
             logger.warning("profile_update_missing_required_fields", extra={"update_request": update_request, "has_action": bool(action), "has_profile_logical_name": bool(profile_logical_name)})
             continue
-        
+
         logger.info("profile_update_processing_started", extra={"run_id": run_id, "action": action, "profile_logical_name": profile_logical_name})
 
         base_profile_dict: Optional[Dict] = None
@@ -118,7 +120,7 @@ async def _apply_profile_updates_in_run_context(run_context: Dict, profile_updat
             if not original_profile_for_event:
                 logger.error("update_action_profile_not_found", extra={"profile_logical_name": profile_logical_name}, exc_info=True)
                 continue
-            
+
             new_profile_instance = copy.deepcopy(original_profile_for_event)
             new_profile_instance["profile_id"] = str(uuid.uuid4())
             new_profile_instance["rev"] = original_profile_for_event.get("rev", 0) + 1
@@ -131,7 +133,7 @@ async def _apply_profile_updates_in_run_context(run_context: Dict, profile_updat
                 if prof.get("name") == profile_logical_name and prof.get("is_active") is True:
                     profiles_store[inst_id]["is_active"] = False
                     logger.info("update_action_deactivated_old_version", extra={"profile_name": prof.get('name'), "instance_id": inst_id, "revision": prof.get('rev')})
-        
+
         # --- Action: DISABLE ---
         elif action == "DISABLE":
             disabled_count = 0
@@ -152,7 +154,7 @@ async def _apply_profile_updates_in_run_context(run_context: Dict, profile_updat
             if not new_logical_name_for_rename:
                 logger.error("rename_action_missing_new_name", extra={"profile_logical_name": profile_logical_name}, exc_info=True)
                 continue
-            
+
             original_profile_for_event = get_active_profile_by_name(profiles_store, profile_logical_name) # This is the "old" profile
             if not original_profile_for_event:
                 logger.error("rename_action_original_not_found", extra={"profile_logical_name": profile_logical_name}, exc_info=True)
@@ -177,7 +179,7 @@ async def _apply_profile_updates_in_run_context(run_context: Dict, profile_updat
                 if prof.get("name") == profile_logical_name and prof.get("is_active") is True: # Check original name
                     profiles_store[inst_id]["is_active"] = False
                     logger.info("rename_action_deactivated_old_profile", extra={"profile_name": prof.get('name'), "instance_id": inst_id, "revision": prof.get('rev')})
-        
+
         else: # Unknown action
             logger.warning("unknown_profile_action", extra={"action": action, "profile_logical_name": profile_logical_name})
             continue
@@ -232,7 +234,7 @@ async def _apply_profile_updates_in_run_context(run_context: Dict, profile_updat
         else: # Should not happen if logic is correct
             logger.warning("profile_update_no_instance_created", extra={"action": action, "run_id": run_id})
             continue
-            
+
         # Emit event
         if event_manager:
             if run_context['meta'].get("run_type") == "partner_interaction":
@@ -243,7 +245,7 @@ async def _apply_profile_updates_in_run_context(run_context: Dict, profile_updat
                     # Remove the old flag-based notification
                     # if "flags" not in partner_state: partner_state["flags"] = {}
                     # partner_state["flags"]["available_profiles_updated"] = True
-                    
+
                     # Add an InboxItem instead
                     partner_state.setdefault("inbox", []).append({
                         "item_id": f"inbox_{uuid.uuid4().hex[:8]}",
@@ -254,7 +256,7 @@ async def _apply_profile_updates_in_run_context(run_context: Dict, profile_updat
                     })
                     logger.info("profile_update_notification_added", extra={"run_id": run_id, "context_type": "partner", "action": action})
                     # --- End Inbox Migration ---
-            
+
             await event_manager.emit_run_config_updated(
                 run_id=run_id,
                 config_type="agent_profile",
@@ -282,6 +284,28 @@ async def handle_start_run_message(ws_state: Dict, data: Dict):
             logger.warning("resume_missing_request_id", extra={"session_id": session_id_for_log, "data": data})
             await event_manager.emit_error(run_id=resume_from_run_id, agent_id="System", error_message="Command 'start_run' for resume requires 'request_id'.")
             return
+
+        # --- Check if run is already in memory (e.g., stopped but not terminated) ---
+        existing_context = active_runs_store.get(resume_from_run_id)
+        if existing_context:
+            logger.info("resume_from_memory", extra={"run_id": resume_from_run_id, "current_status": existing_context.get('meta', {}).get('status')})
+
+            # Update the event manager reference for the new WebSocket connection
+            existing_context['runtime']['event_manager'] = event_manager
+
+            # Ensure status is AWAITING_INPUT
+            existing_context['meta']['status'] = 'AWAITING_INPUT'
+
+            # Register with connection manager for the new session
+            connection_manager.register_run(resume_from_run_id, event_manager.session_id)
+
+            await event_manager.emit_run_ready(resume_from_run_id, request_id)
+            await event_manager.emit_turns_sync(existing_context)
+
+            logger.info("resume_from_memory_completed", extra={"run_id": resume_from_run_id})
+            return
+
+        # --- Run not in memory, load from disk ---
         try:
             iic_path_str = await find_iic_file_by_run_id(resume_from_run_id)
             if not iic_path_str:
@@ -294,7 +318,7 @@ async def handle_start_run_message(ws_state: Dict, data: Dict):
             json_path = iic_path_obj.parent / f"{resume_from_run_id}.json"
             if not json_path.exists():
                 raise FileNotFoundError(f"State file {json_path} not found for run_id {resume_from_run_id}")
-            
+
             with open(json_path, 'r', encoding='utf-8') as f:
                 restored_state_data = json.load(f)
             logger.info("resume_state_loaded", extra={"run_id": resume_from_run_id, "json_path": str(json_path)})
@@ -323,18 +347,22 @@ async def handle_start_run_message(ws_state: Dict, data: Dict):
             logger.info("resume_status_set", extra={"run_id": resume_from_run_id, "status": "AWAITING_INPUT"})
 
             active_runs_store[server_run_id] = run_context
-            
+
+            # Register resumed run with connection manager for resilient handling
+            connection_manager.register_run(server_run_id, event_manager.session_id)
+
             await event_manager.emit_run_ready(server_run_id, request_id)
-            
+
             # Send turns_sync to provide the authoritative data for rendering the conversation.
             await event_manager.emit_turns_sync(run_context)
-            
+
             logger.info("resume_completed", extra={"run_id": server_run_id})
-            
+
             if run_context['meta']['run_type'] == "partner_interaction":
                 partner_ctx = run_context['sub_context_refs']['_partner_context_ref']
                 task = asyncio.create_task(run_partner_interaction_async(partner_context=partner_ctx))
-                ws_state.active_run_tasks[server_run_id] = task
+                run_context['runtime']['active_task'] = task  # Store in run_context
+                ws_state.active_run_tasks[server_run_id] = task  # Also track for cleanup
                 logger.info("resume_partner_task_started", extra={"run_id": server_run_id, "run_type": "partner_interaction"})
 
         except Exception as e:
@@ -367,9 +395,12 @@ async def handle_start_run_message(ws_state: Dict, data: Dict):
             )
             if initial_filename:
                 run_context['meta']['initial_filename'] = initial_filename
-            
+
             logger.info("new_run_context_created", extra={"run_id": server_run_id, "status": "CREATED"})
             active_runs_store[server_run_id] = run_context
+
+            # Register run with connection manager for resilient handling
+            connection_manager.register_run(server_run_id, event_manager.session_id)
 
             # --- NEW: Perform initial persistence BEFORE sending run_ready ---
             from agent_core.iic.core.iic_handlers import persist_initial_run_state
@@ -386,10 +417,15 @@ async def handle_start_run_message(ws_state: Dict, data: Dict):
 
 
 async def handle_stop_run_message(ws_state: Dict, data: Dict):
-    """Handles messages of type 'stop_run'"""
+    """Handles messages of type 'stop_run'.
+
+    This stops the current execution task but KEEPS the run context in memory.
+    The user can send a new message to continue the conversation immediately
+    without needing to resume from disk.
+    """
     run_id_to_stop = data.get("run_id")
-    active_runs_tasks = ws_state.active_run_tasks # Changed: Using HEAD's way
-    event_manager = ws_state.event_manager # Changed: Using HEAD's way
+    active_runs_tasks = ws_state.active_run_tasks
+    event_manager = ws_state.event_manager
     session_id_for_log = event_manager.session_id
 
     if not run_id_to_stop:
@@ -410,16 +446,24 @@ async def handle_stop_run_message(ws_state: Dict, data: Dict):
             logger.warning("stop_run_cancellation_timeout", extra={"run_id": run_id_to_stop, "session_id": session_id_for_log})
         except Exception as e:
             logger.error("stop_run_await_error", extra={"run_id": run_id_to_stop, "session_id": session_id_for_log, "error_message": str(e)}, exc_info=True)
-        
-        # State updates are now handled in the flow's `except CancelledError` block
-        # to prevent race conditions.
+
+        # Remove the task from tracking (but NOT the run context)
+        if run_id_to_stop in active_runs_tasks:
+            del active_runs_tasks[run_id_to_stop]
     else:
         logger.info("stop_run_no_active_task", extra={"session_id": session_id_for_log, "run_id": run_id_to_stop})
-        # The 'no_active_flow_to_stop_or_already_done' status is now inferred on the client.
-    
-    if run_id_to_stop in active_runs_store:
-        del active_runs_store[run_id_to_stop]
-        logger.info("stop_run_context_removed", extra={"session_id": session_id_for_log, "run_id": run_id_to_stop})
+
+    # Update run status to AWAITING_INPUT so it can receive new messages
+    run_context = active_runs_store.get(run_id_to_stop)
+    if run_context:
+        run_context['meta']['status'] = 'AWAITING_INPUT'
+        # Clear the task reference in run_context so it can be restarted
+        if 'active_task' in run_context.get('runtime', {}):
+            run_context['runtime']['active_task'] = None
+        logger.info("stop_run_status_updated", extra={"session_id": session_id_for_log, "run_id": run_id_to_stop, "new_status": "AWAITING_INPUT"})
+
+    # Notify the frontend that the run has been stopped (but is still resumable in-memory)
+    await event_manager.emit_run_stopped(run_id_to_stop, reason="user_requested")
 
 
 async def handle_request_available_toolsets(ws_state: Dict, data: Dict):
@@ -427,14 +471,14 @@ async def handle_request_available_toolsets(ws_state: Dict, data: Dict):
     event_manager = ws_state.event_manager # Changed: Using HEAD's way
     session_id_for_log = event_manager.session_id
     logger.debug("request_available_toolsets_received", extra={"session_id": session_id_for_log, "data": data})
-    
-    scope_filter = data.get("scope") 
-    
+
+    scope_filter = data.get("scope")
+
     try:
         toolsets_info = get_all_toolsets_with_tools(scope_filter=scope_filter)
-        
-        await event_manager.send_json( 
-            run_id=None, 
+
+        await event_manager.send_json(
+            run_id=None,
             message={
                 "type": "available_toolsets_response",
                 "data": {"toolsets": toolsets_info}
@@ -444,8 +488,8 @@ async def handle_request_available_toolsets(ws_state: Dict, data: Dict):
     except Exception as e:
         logger.error("request_available_toolsets_error", extra={"session_id": session_id_for_log, "error_message": str(e)}, exc_info=True)
         await event_manager.emit_error(
-            run_id=None, 
-            agent_id="System", 
+            run_id=None,
+            agent_id="System",
             error_message=f"Failed to retrieve toolsets: {str(e)}"
         )
 
@@ -489,21 +533,21 @@ async def handle_stop_managed_principal_message(ws_state: Dict, data: Dict):
         if principal_subtask_id and hasattr(ws_state, 'active_run_tasks') and principal_subtask_id in ws_state.active_run_tasks:
             del ws_state.active_run_tasks[principal_subtask_id]
             logger.info("stop_managed_principal_task_removed", extra={"session_id": session_id_for_log, "principal_subtask_id": principal_subtask_id})
-        
+
         # V4.1: Access runtime for these handles
         if run_context['runtime'].get("principal_flow_task_handle") is principal_task_handle:
              run_context['runtime']["principal_flow_task_handle"] = None
         if run_context['runtime'].get("current_principal_subtask_id") == principal_subtask_id:
              run_context['runtime']["current_principal_subtask_id"] = None
-        
+
         partner_context_ref = run_context['sub_context_refs'].get("_partner_context_ref") # V4.1: Access sub_context_refs
         if partner_context_ref and partner_context_ref.get("state"):
             partner_context_ref["state"]["is_principal_flow_running"] = False
             logger.info("stop_managed_principal_flag_updated", extra={"session_id": session_id_for_log, "managing_partner_run_id": managing_partner_run_id, "is_principal_flow_running": False})
-        
+
         # The 'principal_task_stopped_by_request' status is now inferred on the client from the turn status.
         logger.info("stop_managed_principal_completed", extra={"managing_partner_run_id": managing_partner_run_id})
-    
+
     elif principal_task_handle and principal_task_handle.done():
         logger.info("stop_managed_principal_already_done", extra={"session_id": session_id_for_log, "principal_subtask_id": principal_subtask_id, "managing_partner_run_id": managing_partner_run_id})
         # The 'principal_task_already_done' status is now inferred on the client.
@@ -525,14 +569,14 @@ async def handle_request_run_profiles_message(ws_state: Dict, data: Dict):
     """Handles 'request_run_profiles' messages, returning the Agent Profile information for the specified run."""
     event_manager = ws_state.event_manager # Changed: Using HEAD's way
     session_id_for_log = event_manager.session_id
-    
+
     run_id = data.get("run_id")
     logger.info("request_run_profiles_received", extra={"session_id": session_id_for_log, "run_id": run_id, "data": data})
 
     if not run_id:
         logger.warning("request_run_profiles_missing_run_id", extra={"session_id": session_id_for_log})
         await event_manager.send_json(
-            run_id=None, 
+            run_id=None,
             message={
                 "type": "run_profiles_response",
                 "run_id": run_id,
@@ -617,7 +661,7 @@ async def handle_request_run_context_message(ws_state: Dict, data: Dict):
         # sanitized_context = sanitize_context_for_serialization(run_context) # Old call
         snapshot_context = get_serializable_run_snapshot(run_context) # New call
         logger.debug("run_context_snapshot_completed", extra={"session_id": session_id_for_log, "run_id": run_id})
-        
+
         await event_manager.send_json(
             run_id=run_id,
             message={
@@ -642,7 +686,7 @@ async def handle_request_knowledge_base_message(ws_state: Dict, data: Dict):
     """Handles 'request_knowledge_base' messages, returning the knowledge base content for the specified run."""
     event_manager = ws_state.event_manager
     session_id_for_log = event_manager.session_id
-    
+
     run_id = data.get("run_id")
     logger.info("request_knowledge_base_received", extra={"session_id": session_id_for_log, "run_id": run_id, "data": data})
 
@@ -671,7 +715,7 @@ async def handle_request_knowledge_base_message(ws_state: Dict, data: Dict):
             }
         )
         return
-    
+
     knowledge_base_instance = run_context['runtime'].get("knowledge_base")
     if not knowledge_base_instance:
         logger.warning("knowledge_base_not_found", extra={"session_id": session_id_for_log, "run_id": run_id})
@@ -688,7 +732,7 @@ async def handle_request_knowledge_base_message(ws_state: Dict, data: Dict):
     try:
         # Mainly send items_by_id, as others are indexes or internal state
         # Ensure the content is serializable
-        
+
         # Create a serializable version of items_by_id
         serializable_items_by_id = {}
         if hasattr(knowledge_base_instance, 'items_by_id') and isinstance(knowledge_base_instance.items_by_id, dict):
@@ -716,7 +760,7 @@ async def handle_request_knowledge_base_message(ws_state: Dict, data: Dict):
             # "items_by_uri_count": len(knowledge_base_instance.items_by_uri),
             # "items_by_hash_count": len(knowledge_base_instance.items_by_hash),
         }
-        
+
         await event_manager.send_json(
             run_id=run_id,
             message={
@@ -741,10 +785,10 @@ async def handle_subscribe_to_view(ws_state: Dict, data: Dict):
     """Handles client requests to subscribe to a view model"""
     event_manager = ws_state.event_manager
     session_id_for_log = event_manager.session_id
-    
+
     run_id = data.get("run_id")
     view_name = data.get("view_name")
-    
+
     logger.info("subscribe_to_view_received", extra={"session_id": session_id_for_log, "run_id": run_id, "view_name": view_name})
 
     if not run_id or not view_name:
@@ -761,12 +805,12 @@ async def handle_subscribe_to_view(ws_state: Dict, data: Dict):
     # Record the subscription relationship (optional, if more complex unsubscribe logic is needed)
     if not hasattr(ws_state, 'subscriptions'):
         ws_state.subscriptions = {}
-    
+
     subscriptions = ws_state.subscriptions
     if run_id not in subscriptions:
         subscriptions[run_id] = set()
     subscriptions[run_id].add(view_name)
-    
+
     # Immediately push the latest view model once
     await trigger_view_model_update(run_context, view_name)
 
@@ -775,10 +819,10 @@ async def handle_unsubscribe_from_view(ws_state: Dict, data: Dict):
     """Handles client requests to unsubscribe from a view model"""
     event_manager = ws_state.event_manager
     session_id_for_log = event_manager.session_id
-    
+
     run_id = data.get("run_id")
     view_name = data.get("view_name")
-    
+
     logger.info("unsubscribe_from_view_received", extra={"session_id": session_id_for_log, "run_id": run_id, "view_name": view_name})
 
     if run_id and view_name and hasattr(ws_state, 'subscriptions'):
@@ -810,7 +854,7 @@ async def handle_manage_work_modules_request(ws_state: Dict, data: Dict):
         logger.warning("manage_work_modules_context_not_found", extra={"session_id": session_id_for_log, "run_id": run_id})
         await event_manager.emit_error(run_id=run_id, agent_id="System", error_message=f"Run '{run_id}' not found.")
         return
-    
+
     team_state = run_context['team_state'] # V4.1: team_state is a direct key
     if not team_state: # Should not happen if run_context is valid
         logger.error("manage_work_modules_no_team_state", extra={"session_id": session_id_for_log, "run_id": run_id}, exc_info=True)
@@ -822,7 +866,7 @@ async def handle_manage_work_modules_request(ws_state: Dict, data: Dict):
     if update_result.get("overall_status") != "failure":
         team_state["work_modules"] = update_result.get("final_work_modules", team_state.get("work_modules"))
         logger.info("work_modules_updated", extra={"run_id": run_id, "source": "direct_request"})
-        
+
         # Trigger kanban view update
         await trigger_view_model_update(run_context, "kanban_view")
     else:
@@ -867,12 +911,12 @@ async def handle_send_to_run_message(ws_state: Dict, data: Dict):
         # --- Branch 1: Activate a pending run ---
         if run_status == 'CREATED':
             logger.debug("run_activation_started", extra={"run_id": target_run_id, "run_type": run_type})
-            
+
             if prompt_content is None:
                 raise ValueError("First message to a new run must contain a 'prompt'.")
-            
+
             run_context['team_state']['question'] = prompt_content
-            
+
             task = None
             if run_type == "partner_interaction":
                 partner_context = run_context['sub_context_refs']['_partner_context_ref']
@@ -887,19 +931,20 @@ async def handle_send_to_run_message(ws_state: Dict, data: Dict):
                     "metadata": {"created_at": datetime.now(timezone.utc).isoformat()}
                 }
                 partner_state.setdefault("inbox", []).append(inbox_item)
-                
+
                 # 2. Start the task
                 task = asyncio.create_task(run_partner_interaction_async(partner_context=partner_context))
             else:
                 raise ValueError(f"Run type '{run_type}' does not support activation via 'send_to_run'.")
 
-            ws_state.active_run_tasks[target_run_id] = task
+            run_context['runtime']['active_task'] = task  # Store in run_context
+            ws_state.active_run_tasks[target_run_id] = task  # Also track for cleanup
             task.add_done_callback(
                 lambda t: logger.info("run_task_finished", extra={"run_id": target_run_id, "run_type": run_type, "session_id": session_id_for_log})
                 if not t.cancelled() else
                 logger.info("run_task_cancelled", extra={"run_id": target_run_id, "run_type": run_type, "session_id": session_id_for_log})
             )
-            
+
             run_context['meta']['status'] = 'AWAITING_INPUT'
             logger.debug("run_activation_completed", extra={"run_id": target_run_id, "status": "AWAITING_INPUT"})
 
@@ -930,6 +975,21 @@ async def handle_send_to_run_message(ws_state: Dict, data: Dict):
                 }
                 partner_state.setdefault("inbox", []).append(inbox_item)
 
+                # Check if task exists and is running; if not, restart it
+                # Store task in run_context to prevent duplicate tasks across WebSocket connections
+                run_runtime = run_context['runtime']
+                existing_task = run_runtime.get('active_task')
+                if existing_task is None or existing_task.done():
+                    logger.info("restarting_partner_task", extra={"run_id": target_run_id, "reason": "task_not_running"})
+                    task = asyncio.create_task(run_partner_interaction_async(partner_context=partner_context))
+                    run_runtime['active_task'] = task
+                    ws_state.active_run_tasks[target_run_id] = task  # Also track in ws_state for cleanup
+                    task.add_done_callback(
+                        lambda t: logger.info("run_task_finished", extra={"run_id": target_run_id, "run_type": run_type, "session_id": session_id_for_log})
+                        if not t.cancelled() else
+                        logger.info("run_task_cancelled", extra={"run_id": target_run_id, "run_type": run_type, "session_id": session_id_for_log})
+                    )
+
                 # Wake up the task
                 new_input_event = partner_context['runtime_objects'].get("new_user_input_event")
                 if new_input_event:
@@ -937,7 +997,7 @@ async def handle_send_to_run_message(ws_state: Dict, data: Dict):
                     logger.info("partner_task_notified", extra={"run_id": target_run_id, "notification_method": "inbox"})
                 else:
                     logger.error("partner_notification_failed", extra={"run_id": target_run_id, "reason": "new_user_input_event_not_found"}, exc_info=True)
-            
+
         # --- Branch 3: Handle invalid states ---
         else:
             err_msg = f"Cannot send message to run {target_run_id} because its status is '{run_status}'."
@@ -948,6 +1008,181 @@ async def handle_send_to_run_message(ws_state: Dict, data: Dict):
     except Exception as e:
         logger.error("send_to_run_processing_error", extra={"session_id": session_id_for_log, "target_run_id": target_run_id, "run_type": run_type, "error_message": str(e)}, exc_info=True)
         await event_manager.emit_error(run_id=target_run_id, agent_id="System", error_message=f"Error processing message for run {target_run_id}: {str(e)}")
+
+
+# --- Session Resilience Handlers ---
+
+async def handle_reconnect_message(ws_state, data: Dict):
+    """
+    Handle reconnection request from a client that was previously connected.
+
+    This message is sent when:
+    - Browser refreshes during an active run
+    - Network temporarily disconnects and reconnects
+    - Tab goes to background and comes back
+
+    The client must provide:
+    - run_id: The run to reconnect to
+    - last_event_id: Last event received (for replay)
+
+    Security: JWT validation happens before this handler is called.
+    """
+    event_manager = ws_state.event_manager
+    session_id = getattr(ws_state, 'session_id', event_manager.session_id)
+    websocket = getattr(ws_state, 'websocket', None)
+
+    run_id = data.get("run_id")
+    last_event_id = data.get("last_event_id", 0)
+
+    if not run_id:
+        logger.warning("reconnect_missing_run_id", extra={"session_id": session_id})
+        await event_manager.emit_raw("reconnect_error", {
+            "type": "reconnect_error",
+            "error": "Missing run_id in reconnect request",
+        })
+        return
+
+    logger.info(
+        "reconnect_request_received",
+        extra={
+            "session_id": session_id,
+            "run_id": run_id,
+            "last_event_id": last_event_id,
+        }
+    )
+
+    # Check if run exists and can be reconnected
+    run_context = active_runs_store.get(run_id)
+    if not run_context:
+        logger.warning("reconnect_run_not_found", extra={"session_id": session_id, "run_id": run_id})
+        await event_manager.emit_raw("reconnect_error", {
+            "type": "reconnect_error",
+            "error": f"Run {run_id} not found",
+            "run_id": run_id,
+        })
+        return
+
+    # Attempt reconnection via connection manager
+    try:
+        result = await connection_manager.reconnect_run(
+            run_id=run_id,
+            new_session_id=session_id,
+            websocket=websocket,
+            event_manager=event_manager,
+        )
+
+        if result["success"]:
+            # Update ws_state with reconnected run
+            ws_state.active_run_id = run_id
+
+            # Get run status
+            run_status = run_context.get('meta', {}).get('status', 'unknown')
+
+            # Send reconnection confirmation
+            await event_manager.emit_raw("reconnected", {
+                "type": "reconnected",
+                "run_id": run_id,
+                "run_status": run_status,
+                "buffered_events": result.get("buffered_events", []),
+                "events_replayed": result.get("events_replayed", 0),
+                "message": f"Successfully reconnected to run {run_id}",
+            })
+
+            logger.info(
+                "reconnect_success",
+                extra={
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "events_replayed": result.get("events_replayed", 0),
+                }
+            )
+        else:
+            error_msg = result.get("error", "Unknown error during reconnection")
+            logger.warning(
+                "reconnect_failed",
+                extra={
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "error": error_msg,
+                }
+            )
+            await event_manager.emit_raw("reconnect_error", {
+                "type": "reconnect_error",
+                "error": error_msg,
+                "run_id": run_id,
+            })
+
+    except Exception as e:
+        logger.error(
+            "reconnect_exception",
+            extra={
+                "session_id": session_id,
+                "run_id": run_id,
+                "error": str(e),
+            },
+            exc_info=True
+        )
+        await event_manager.emit_raw("reconnect_error", {
+            "type": "reconnect_error",
+            "error": f"Reconnection failed: {str(e)}",
+            "run_id": run_id,
+        })
+
+
+async def handle_heartbeat_message(ws_state, data: Dict):
+    """
+    Handle client-initiated heartbeat.
+
+    Client sends heartbeat every CLIENT_HEARTBEAT_INTERVAL_SECONDS (default: 20s).
+    Server responds with heartbeat_ack to confirm session validity and server health.
+
+    This complements server-initiated ping/pong by:
+    - Detecting server unresponsiveness (server alive but not processing)
+    - Providing client-side health check capability
+    - Enabling faster detection of server overload scenarios
+    """
+    event_manager = ws_state.event_manager
+    session_id = getattr(ws_state, 'session_id', event_manager.session_id)
+
+    client_timestamp = data.get("timestamp")
+    client_run_id = data.get("run_id")
+    client_session_id = data.get("session_id")
+
+    # Validate session ID matches
+    session_valid = (client_session_id == session_id) if client_session_id else True
+
+    # Update heartbeat state in connection manager
+    try:
+        await connection_manager.handle_client_heartbeat(
+            session_id=session_id,
+            client_timestamp=client_timestamp,
+            run_id=client_run_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "client_heartbeat_handling_error",
+            extra={"session_id": session_id, "error": str(e)},
+        )
+
+    # Send acknowledgment
+    from datetime import datetime, timezone
+    server_time = datetime.now(timezone.utc).isoformat()
+
+    await event_manager.emit_raw("heartbeat_ack", {
+        "type": "heartbeat_ack",
+        "timestamp": client_timestamp,
+        "serverTime": server_time,
+        "sessionValid": session_valid,
+    })
+
+    logger.debug(
+        "client_heartbeat_acknowledged",
+        extra={
+            "session_id": session_id,
+            "client_timestamp": client_timestamp,
+            "run_id": client_run_id,
+        }
+    )
 
 # --- MESSAGE_HANDLERS registry (Dango's version, with adapted function names) ---
 MESSAGE_HANDLERS: Dict[str, callable] = {
@@ -962,6 +1197,9 @@ MESSAGE_HANDLERS: Dict[str, callable] = {
     "subscribe_to_view": handle_subscribe_to_view, # New view subscription handler
     "unsubscribe_from_view": handle_unsubscribe_from_view, # New view unsubscription handler
     "manage_work_modules_request": handle_manage_work_modules_request, # New module management handler
+    # Session resilience handlers
+    "reconnect": handle_reconnect_message,  # Client reconnection to existing run
+    "heartbeat": handle_heartbeat_message,  # Client-initiated heartbeat
 }
 
 # Ensure old handlers (if they were ever in a combined state) are not present

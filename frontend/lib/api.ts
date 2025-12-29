@@ -7,27 +7,49 @@ interface Metadata {
 
 interface SessionResponse {
   session_id: string;
+  jwt_token: string;
+  refresh_token: string;
+  expires_in: number;
+  status: string;
+}
+
+interface RefreshResponse {
+  jwt_token: string;
+  refresh_token: string;
+  expires_in: number;
+}
+
+export interface RunStatusResponse {
   run_id: string;
-  ws_url: string;
+  exists: boolean;
+  state?: string;
+  can_reconnect: boolean;
+  connected_at?: string;
+  disconnected_at?: string;
+  grace_period_expires?: string;
+  buffered_events?: number;
+  last_checkpoint?: string;
+  message?: string;
 }
 
 export class ProjectService {
-  // Generic fetch method
+  // Generic fetch method with credentials
   private static async fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const url = `${config.api.baseUrl}${endpoint}`
-    
+
     const response = await fetch(url, {
       headers: {
         'Content-Type': 'application/json',
         ...options?.headers,
       },
+      credentials: 'include', // Include cookies for fingerprint
       ...options,
     })
-    
+
     if (!response.ok) {
       throw new Error(`API Error: ${response.status} ${response.statusText}`)
     }
-    
+
     return response.json()
   }
 
@@ -43,10 +65,13 @@ export class ProjectService {
 
   // Create new project
   static async createProject(data: CreateProjectRequest): Promise<{ message: string; data: Project }> {
-    return this.fetchApi<{ message:string; data: Project }>('/project', {
+    console.log('[DEBUG] ProjectService.createProject called with:', data)
+    const result = await this.fetchApi<{ message:string; data: Project }>('/project', {
       method: 'POST',
       body: JSON.stringify(data),
     })
+    console.log('[DEBUG] createProject result:', result)
+    return result
   }
 
   // Update project
@@ -70,12 +95,25 @@ export class ProjectService {
     return this.fetchApi<Metadata>(`/metadata${query}`)
   }
 
-  // Create session
-  static async createSession(): Promise<SessionResponse> {
+  // Create session (with JWT tokens)
+  static async createSession(projectId: string = 'default'): Promise<SessionResponse> {
     return this.fetchApi<SessionResponse>('/session', {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify({ project_id: projectId }),
     })
+  }
+
+  // Refresh session tokens
+  static async refreshSession(refreshToken: string): Promise<RefreshResponse> {
+    return this.fetchApi<RefreshResponse>('/session/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    })
+  }
+
+  // Get run connection status
+  static async getRunStatus(runId: string): Promise<RunStatusResponse> {
+    return this.fetchApi<RunStatusResponse>(`/run/${runId}/status`)
   }
 
   // Update run metadata
@@ -87,15 +125,15 @@ export class ProjectService {
   }
 
   // Rename run
-  static async renameRun(runId: string, newName: string): Promise<{ 
-    message: string; 
-    old_filename: string; 
-    new_filename: string 
+  static async renameRun(runId: string, newName: string): Promise<{
+    message: string;
+    old_filename: string;
+    new_filename: string
   }> {
-    return this.fetchApi<{ 
-      message: string; 
-      old_filename: string; 
-      new_filename: string 
+    return this.fetchApi<{
+      message: string;
+      old_filename: string;
+      new_filename: string
     }>(`/run/${runId}/name`, {
       method: 'PUT',
       body: JSON.stringify({ new_name: newName }),
@@ -110,19 +148,19 @@ export class ProjectService {
   }
 
   // Move run to another project
-  static async moveRun(runId: string, fromProjectId: string, toProjectId: string): Promise<{ 
-    message: string; 
-    old_filename: string; 
-    new_filename: string; 
-    source_project: string; 
-    destination_project: string 
+  static async moveRun(runId: string, fromProjectId: string, toProjectId: string): Promise<{
+    message: string;
+    old_filename: string;
+    new_filename: string;
+    source_project: string;
+    destination_project: string
   }> {
-    return this.fetchApi<{ 
-      message: string; 
-      old_filename: string; 
-      new_filename: string; 
-      source_project: string; 
-      destination_project: string 
+    return this.fetchApi<{
+      message: string;
+      old_filename: string;
+      new_filename: string;
+      source_project: string;
+      destination_project: string
     }>('/run/move', {
       method: 'POST',
       body: JSON.stringify({
@@ -132,4 +170,4 @@ export class ProjectService {
       }),
     })
   }
-} 
+}

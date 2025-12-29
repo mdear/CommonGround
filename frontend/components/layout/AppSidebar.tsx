@@ -143,7 +143,7 @@ export const AppSidebar = observer(function AppSidebar() {
       setModelProviders(data.modelProviders)
       setGeneralSettings(data.generalSettings || {})
       setAboutInfo(data.aboutInfo || null)
-      
+
       // Initialize API Keys
       const keys: Record<string, string> = {}
       Object.values(data.modelProviders).forEach((provider: ModelProvider) => {
@@ -198,7 +198,7 @@ export const AppSidebar = observer(function AppSidebar() {
         value
       }
     }))
-    
+
     // API call to save settings can be made here
     console.log(`Updating setting ${settingId} to:`, value)
   }
@@ -251,9 +251,14 @@ export const AppSidebar = observer(function AppSidebar() {
 
   // Create new project
   const handleCreateProject = async () => {
-    if (!newProjectName.trim()) return
-    
+    console.log('[DEBUG] handleCreateProject called, newProjectName:', JSON.stringify(newProjectName))
+    if (!newProjectName.trim()) {
+      console.log('[DEBUG] newProjectName is empty, returning')
+      return
+    }
+
     try {
+      console.log('[DEBUG] Calling projectStore.createProject with:', { name: newProjectName.trim() })
       await projectStore.createProject({ name: newProjectName.trim() })
       setNewProjectName("")
       setIsNewProjectOpen(false)
@@ -275,9 +280,9 @@ export const AppSidebar = observer(function AppSidebar() {
       }
       return dbName;
     };
-    
+
     const currentProjectName = getCurrentProjectName(project.project_id, project.name);
-    
+
     // Use setTimeout to ensure the DropdownMenu is fully closed before opening the Dialog
     setTimeout(() => {
       setEditingProject({ id: project.project_id, name: currentProjectName })
@@ -288,13 +293,13 @@ export const AppSidebar = observer(function AppSidebar() {
 
   const handleUpdateProject = async () => {
     if (!editingProject || !editProjectName.trim()) return
-    
+
     try {
       console.log('AppSidebar updating:', editProjectName.trim());
-      
+
       // Only call the API, subsequent synchronization relies entirely on projectStore.updateProject() → loadProjects() → updateProjectsMap()
       await projectStore.updateProject(editingProject.id, { name: editProjectName.trim() })
-      
+
       setEditingProject(null)
       setEditProjectName("")
       setIsEditProjectOpen(false)
@@ -307,23 +312,23 @@ export const AppSidebar = observer(function AppSidebar() {
   // Delete project
   const handleConfirmDeleteProject = async () => {
     if (!projectToDeleteId) return
-    
+
     try {
       await projectStore.deleteProject(projectToDeleteId)
-      
+
       // After successful deletion, check and clear related selection states
       const deletedProjectId = projectToDeleteId;
-      
+
       // If the currently selected project is the one being deleted, clear the selection state
       if (selectionStore.selectedProject?.projectId === deletedProjectId) {
         selectionStore.clearSelection();
       }
-      
+
       // If the currently selected file belongs to the deleted project, also clear the selection state
       if (selectionStore.selectedFile?.projectId === deletedProjectId) {
         selectionStore.clearSelection();
       }
-      
+
     } catch (error) {
       console.error('Failed to delete project:', error)
       // Error hints can be added here
@@ -345,7 +350,7 @@ export const AppSidebar = observer(function AppSidebar() {
   // Handle file selection - use router navigation
   const handleFileSelect = (run: { filename?: string; meta: { run_id?: string; description?: string } }, projectData: { project: { project_id: string; name: string } }, index: number) => {
     const runId = run.meta.run_id || `${projectData.project.project_id}-${index}`;
-    
+
     if (runId) {
       // Navigate to the run page
               router.push(`/r?id=${runId}`);
@@ -371,7 +376,7 @@ export const AppSidebar = observer(function AppSidebar() {
 
   const handleUpdateFileName = async () => {
     if (!editingFile || !editFileName.trim()) return
-    
+
     try {
       await projectStore.renameRun(editingFile.runId, editFileName.trim())
       setEditingFile(null)
@@ -414,19 +419,19 @@ export const AppSidebar = observer(function AppSidebar() {
   const handleDragStart = (e: React.DragEvent, run: { filename?: string; meta: { run_id?: string; description?: string } }, projectId: string) => {
     const runId = run.meta.run_id
     const filename = run.filename || run.meta.description || 'Untitled'
-    
+
     // If there is no run_id, it cannot be dragged
     if (!runId) {
       e.preventDefault()
       return
     }
-    
+
     setDraggedFile({
       runId,
       filename,
       fromProjectId: projectId
     })
-    
+
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', runId)
   }
@@ -441,7 +446,7 @@ export const AppSidebar = observer(function AppSidebar() {
   const handleDragOver = (e: React.DragEvent, projectId: string) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
-    
+
     // Cannot drag to the same project
     if (draggedFile && draggedFile.fromProjectId !== projectId) {
       setDragOverProject(projectId)
@@ -457,11 +462,11 @@ export const AppSidebar = observer(function AppSidebar() {
   const handleDrop = async (e: React.DragEvent, toProjectId: string) => {
     e.preventDefault()
     setDragOverProject(null)
-    
+
     if (!draggedFile || draggedFile.fromProjectId === toProjectId) {
       return
     }
-    
+
     try {
       await projectStore.moveRun(draggedFile.runId, draggedFile.fromProjectId, toProjectId)
       // Clear selection state on success
@@ -505,10 +510,10 @@ export const AppSidebar = observer(function AppSidebar() {
                     <div className="flex items-center justify-center h-9 w-9 rounded-md border border-input bg-background">
                       <div className="text-lg">🤖</div>
                     </div>
-                    <Input 
-                      id="name" 
-                      placeholder="Project name" 
-                      className="flex-1" 
+                    <Input
+                      id="name"
+                      placeholder="Project name"
+                      className="flex-1"
                       value={newProjectName}
                       onChange={(e) => setNewProjectName(e.target.value)}
                       onKeyPress={(e) => e.key === 'Enter' && handleCreateProject()}
@@ -554,10 +559,10 @@ export const AppSidebar = observer(function AppSidebar() {
                   <div className="flex items-center justify-center h-9 w-9 rounded-md border border-input bg-background">
                     <div className="text-lg">🤖</div>
                   </div>
-                  <Input 
-                    id="edit-name" 
-                    placeholder="Project name" 
-                    className="flex-1" 
+                  <Input
+                    id="edit-name"
+                    placeholder="Project name"
+                    className="flex-1"
                     value={editProjectName}
                     onChange={(e) => setEditProjectName(e.target.value)}
                     onKeyPress={(e) => e.key === 'Enter' && handleUpdateProject()}
@@ -613,10 +618,10 @@ export const AppSidebar = observer(function AppSidebar() {
                   <div className="flex items-center justify-center h-9 w-9 rounded-md border border-input bg-background">
                     <div className="text-lg">📄</div>
                   </div>
-                  <Input 
-                    id="edit-file-name" 
-                    placeholder="File name" 
-                    className="flex-1" 
+                  <Input
+                    id="edit-file-name"
+                    placeholder="File name"
+                    className="flex-1"
                     value={editFileName}
                     onChange={(e) => setEditFileName(e.target.value)}
                     onKeyPress={(e) => e.key === 'Enter' && handleUpdateFileName()}
@@ -669,7 +674,7 @@ export const AppSidebar = observer(function AppSidebar() {
                     // Default Project always comes first
                     if (a.project.project_id === 'default') return -1;
                     if (b.project.project_id === 'default') return 1;
-                    
+
                     // Other projects are sorted by created_at in descending order (newest first)
                     const dateA = new Date(a.project.created_at);
                     const dateB = new Date(b.project.created_at);
@@ -686,12 +691,12 @@ export const AppSidebar = observer(function AppSidebar() {
                       }
                       return dbName;
                     };
-                    
+
                     const displayProjectName = getProjectDisplayName(
-                      projectData.project.project_id, 
+                      projectData.project.project_id,
                       projectData.project.name
                     );
-                    
+
                     return (
                       <Collapsible
                         open={selectionStore.isProjectOpen(projectData.project.project_id)}
@@ -699,7 +704,7 @@ export const AppSidebar = observer(function AppSidebar() {
                         key={projectData.project.project_id}
                       >
                         <SidebarMenuItem>
-                          <SidebarMenuButton 
+                          <SidebarMenuButton
                             onClick={() => handleProjectSelect(projectData.project)}
                             className={`w-full relative hover:bg-accent transition-all duration-200 ${
                               dragOverProject === projectData.project.project_id ? 'bg-blue-100 border-2 border-blue-300 border-dashed scale-[1.02]' : ''
@@ -734,7 +739,7 @@ export const AppSidebar = observer(function AppSidebar() {
                                   <SquarePen className="mr-2 h-4 w-4" />
                                   <span>Edit Project</span>
                                 </DropdownMenuItem>
-                                <DropdownMenuItem 
+                                <DropdownMenuItem
                                   className="text-red-600 focus:text-red-600 focus:bg-red-50"
                                   onClick={() => triggerDeleteProject(projectData.project.project_id)}
                                 >
@@ -750,25 +755,32 @@ export const AppSidebar = observer(function AppSidebar() {
                           <CollapsibleContent>
                             <SidebarMenuSub className="mx-0 pr-0">
                               {projectData.runs
-                                .slice().sort((a, b) => {
+                                .slice()
+                                // Deduplicate runs by run_id (keep first occurrence)
+                                .filter((run, index, self) => {
+                                  const runId = run.meta?.run_id;
+                                  if (!runId) return true; // Keep runs without run_id
+                                  return self.findIndex(r => r.meta?.run_id === runId) === index;
+                                })
+                                .sort((a, b) => {
                                   // Files are sorted by created in descending order (newest first)
                                   const getCreated = (run: { meta?: { created?: string; [key: string]: unknown } }) => {
                                     const meta = run.meta || {};
                                     return meta.created || null;
                                   };
-                                  
+
                                   const timeA = getCreated(a);
                                   const timeB = getCreated(b);
-                                  
+
                                   // If both have created, sort by time in descending order
                                   if (timeA && timeB) {
                                     return new Date(timeB).getTime() - new Date(timeA).getTime();
                                   }
-                                  
+
                                   // Those with created come first
                                   if (timeA && !timeB) return -1;
                                   if (!timeA && timeB) return 1;
-                                  
+
                                   // If neither has created, maintain original order
                                   return 0;
                                 })
@@ -780,16 +792,16 @@ export const AppSidebar = observer(function AppSidebar() {
                                 const displayNameFromMeta = typeof run.meta?.display_name === 'string' ? run.meta.display_name : null;
                                 const filename = run.filename;
                                 const description = run.meta?.description;
-                                
+
                                 const fullName = displayNameFromMeta || filename || description || 'Untitled';
-                                
+
                                 // Improved file name display logic, remove .iic extension
                                 const displayFileName = removeIicExtension(fullName);
-                                
+
                                 return (
                                   <SidebarMenuSubItem key={`${projectData.project.project_id}-${run.meta.run_id || run.filename || index}`} className="group/item">
                                     <div className="relative flex items-center w-full hover:bg-accent/50 rounded-sm transition-colors">
-                                      <SidebarMenuSubButton 
+                                      <SidebarMenuSubButton
                                         className={`cursor-pointer pl-6 text-sm relative before:absolute before:left-[7px] before:top-[50%] before:w-3 before:h-px before:bg-border flex-1 min-w-0 text-foreground ${
                                           isSelected ? 'bg-accent' : ''
                                         } ${draggedFile?.runId === run.meta.run_id ? 'opacity-50 transition-opacity duration-200' : ''}`}
@@ -801,7 +813,7 @@ export const AppSidebar = observer(function AppSidebar() {
                                       >
                                         <span className="truncate block">{displayFileName}</span>
                                       </SidebarMenuSubButton>
-                                        
+
                                         {/* File action icons */}
                                         <div className="absolute top-1/2 -translate-y-1/2 right-1.5 flex items-center gap-0.5 opacity-0 group-hover/item:opacity-100 transition-opacity p-0.5 rounded-md bg-accent">
                                           <Button
@@ -878,8 +890,8 @@ export const AppSidebar = observer(function AppSidebar() {
         {/* <div className="p-3">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button 
-                variant="ghost" 
+              <Button
+                variant="ghost"
                 className="w-full justify-start gap-2 px-2 focus-visible:ring-0 focus-visible:ring-offset-0 focus:outline-none"
               >
                 <Avatar className="h-8 w-8 rounded-md">
@@ -908,7 +920,7 @@ export const AppSidebar = observer(function AppSidebar() {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div> 
+        </div>
       </div>*/}
 
       {/* Settings Dialog */}
@@ -938,7 +950,7 @@ export const AppSidebar = observer(function AppSidebar() {
                 })}
               </div>
             </div>
-            
+
             {/* Right Content */}
             <div className="flex-1 p-6">
               {activeSettingTab === 'model-provider' && (
@@ -947,7 +959,7 @@ export const AppSidebar = observer(function AppSidebar() {
                   <p className="text-gray-500 text-sm mb-8">
                     Receive emails about new products, features, and more.
                   </p>
-                  
+
                   {settingsLoading ? (
                     <div className="text-center py-8">
                       <div className="text-gray-500">Loading...</div>
@@ -1012,14 +1024,14 @@ export const AppSidebar = observer(function AppSidebar() {
                   )}
                 </div>
               )}
-              
+
               {activeSettingTab === 'general-settings' && (
                 <div>
                   <h3 className="text-2xl font-semibold mb-2">General Settings</h3>
                   <p className="text-gray-500 text-sm mb-8">
                     Receive emails about new products, features, and more.
                   </p>
-                  
+
                   {settingsLoading ? (
                     <div className="text-center py-8">
                       <div className="text-gray-500">Loading...</div>
@@ -1032,7 +1044,7 @@ export const AppSidebar = observer(function AppSidebar() {
                             <h4 className="text-base font-medium mb-1">{setting.label}</h4>
                             <p className="text-sm text-gray-500">{setting.description}</p>
                           </div>
-                          
+
                           <div className="flex items-center">
                             {setting.type === 'switch' ? (
                               <Switch
@@ -1063,14 +1075,14 @@ export const AppSidebar = observer(function AppSidebar() {
                   )}
                 </div>
               )}
-              
+
               {activeSettingTab === 'about' && (
                 <div>
                   <h3 className="text-2xl font-semibold mb-2">About</h3>
                   <p className="text-gray-500 text-sm mb-8">
                     Receive emails about new products, features, and more.
                   </p>
-                  
+
                   {settingsLoading ? (
                     <div className="text-center py-8">
                       <div className="text-gray-500">Loading...</div>
@@ -1081,8 +1093,8 @@ export const AppSidebar = observer(function AppSidebar() {
                       <div className="flex items-center justify-between py-4">
                         <div className="flex items-center gap-3">
                           <div className="w-12 h-12 rounded-lg bg-black flex items-center justify-center">
-                            <Image 
-                              src={aboutInfo.appInfo.icon} 
+                            <Image
+                              src={aboutInfo.appInfo.icon}
                               alt={aboutInfo.appInfo.name}
                               width={32}
                               height={32}
@@ -1152,4 +1164,4 @@ export const AppSidebar = observer(function AppSidebar() {
       </Dialog>
     </Sidebar>
   )
-}); 
+});
