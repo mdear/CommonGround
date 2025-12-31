@@ -70,6 +70,7 @@ class JinaVisitNode(BaseToolNode):
             jina_key = get_jina_key()
             if not jina_key:
                 error_message = "JINA_KEY environment variable is not set"
+                logger.error("jina_api_key_missing", extra={"url": url})
             else:
                 headers = {"Authorization": f"Bearer {jina_key}"}
                 async with aiohttp.ClientSession() as session:
@@ -91,11 +92,34 @@ class JinaVisitNode(BaseToolNode):
                                 except Exception: pass
                             success_flag = True
                         else:
+                            error_text = await response.text()
                             error_message = f"Failed to visit, status code: {response.status}"
+                            # Log with appropriate severity based on error type
+                            if response.status == 402:
+                                logger.error("jina_api_insufficient_balance", extra={
+                                    "url": url,
+                                    "http_status": response.status,
+                                    "error_detail": error_text,
+                                    "action_required": "Recharge Jina API account at https://jina.ai"
+                                })
+                            elif response.status == 429:
+                                logger.warning("jina_api_rate_limited", extra={
+                                    "url": url,
+                                    "http_status": response.status,
+                                    "error_detail": error_text
+                                })
+                            else:
+                                logger.error("jina_api_error", extra={
+                                    "url": url,
+                                    "http_status": response.status,
+                                    "error_detail": error_text
+                                })
         except asyncio.TimeoutError:
             error_message = "Timeout when visiting URL"
+            logger.warning("jina_api_timeout", extra={"url": url})
         except Exception as e:
             error_message = f"Error visiting URL: {str(e)}"
+            logger.error("jina_api_exception", extra={"url": url, "error": str(e)})
 
         # Prepare content for the LLM
         main_content_for_llm = {

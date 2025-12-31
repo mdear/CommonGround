@@ -8,7 +8,24 @@ the limit.
 Design Principles:
 - Monitor, don't truncate: We track consumption and trigger early completion
 - Respect agent autonomy: At warning threshold, inject guidance; at critical, force action
+- Respect agent capability: Only force tools that exist in the agent's toolset
 - Fail gracefully: Even at critical threshold, we guide to completion rather than crash
+
+Threshold Levels:
+- HEALTHY (<60%): Normal operation, no intervention
+- WARNING (60-75%): Inject guidance directive suggesting wrap-up
+- CRITICAL (75-85%): Force completion for agents with flow-ending tools
+- EXCEEDED (>85%): Circuit breaker fires, 15% headroom remains for wrap-up
+
+Agent-Type-Aware Behavior:
+- Principal: Has `finish_flow` → can be forced at CRITICAL/EXCEEDED
+- Partner: No flow-ending tools → guidance only, cannot be forced
+- Associate: Has `generate_message_summary` → can be forced at CRITICAL/EXCEEDED
+
+At EXCEEDED threshold:
+- Principal: Synthesizes partial results and calls finish_flow
+- Partner: Returns user-visible message explaining limit reached
+- Associate: Creates handback package for Principal to summarize
 """
 
 import logging
@@ -20,10 +37,10 @@ logger = logging.getLogger(__name__)
 
 class ContextBudgetStatus(Enum):
     """Status levels for context budget consumption."""
-    HEALTHY = auto()      # < 40% - Normal operation
-    WARNING = auto()      # 40-55% - Inject guidance to wrap up
-    CRITICAL = auto()     # 55-70% - Force immediate completion
-    EXCEEDED = auto()     # > 70% - Circuit breaker, 30% remains for wrap-up
+    HEALTHY = auto()      # < 60% - Normal operation
+    WARNING = auto()      # 60-75% - Inject guidance to wrap up
+    CRITICAL = auto()     # 75-85% - Force immediate completion
+    EXCEEDED = auto()     # > 85% - Circuit breaker, 15% remains for wrap-up
 
 
 # Default context limits by model family (tokens)
@@ -49,13 +66,14 @@ MODELS_SUPPORTING_1M_CONTEXT = {
 }
 
 # Threshold percentages
-# These are set to leave 30% headroom for final summarization/wrap-up
-WARNING_THRESHOLD = 0.40   # 40% - Start suggesting wrap-up
-CRITICAL_THRESHOLD = 0.55  # 55% - Force completion
-EXCEEDED_THRESHOLD = 0.70  # 70% - Circuit breaker triggers, 30% remains for wrap-up
+# These are set to leave 15% headroom for final summarization/wrap-up
+# while allowing agents to make meaningful progress before being interrupted
+WARNING_THRESHOLD = 0.60   # 60% - Start suggesting wrap-up
+CRITICAL_THRESHOLD = 0.75  # 75% - Force completion
+EXCEEDED_THRESHOLD = 0.85  # 85% - Circuit breaker triggers, 15% remains for wrap-up
 
 # Budget allocation constants
-SUMMARIZATION_RESERVE_PERCENT = 0.30  # Reserve 30% for summarization and wrap-up
+SUMMARIZATION_RESERVE_PERCENT = 0.15  # Reserve 15% for summarization and wrap-up
 
 
 def calculate_worker_budget(
@@ -246,6 +264,11 @@ def generate_context_budget_directive(
     For HEALTHY status, returns None (no injection needed).
     For WARNING/CRITICAL/EXCEEDED, returns a directive to guide the agent.
 
+    Agent-type-aware directives:
+    - Principal: Has `finish_flow` tool - direct to call it
+    - Partner: Does NOT have `finish_flow` - advise to complete current response
+    - Associate: Has `generate_message_summary` - direct to call it
+
     Args:
         status: The current ContextBudgetStatus
         metadata: Metadata from assess_context_budget
@@ -260,13 +283,137 @@ def generate_context_budget_directive(
     utilization = metadata.get("utilization_percent", 0)
     remaining = metadata.get("remaining_tokens", 0)
 
-    # Select appropriate tool name based on agent type
-    if agent_type in ("principal", "partner"):
-        wrap_up_tool = "finish_flow"
-        wrap_up_action = "conclude your analysis and finalize results"
+    # Agent-type-specific directives
+    # Partner does NOT have finish_flow or generate_message_summary tools
+    if agent_type == "partner":
+        return _generate_partner_directive(status, utilization, remaining)
+    elif agent_type == "principal":
+        return _generate_principal_directive(status, utilization, remaining)
     else:
-        wrap_up_tool = "generate_message_summary"
-        wrap_up_action = "summarize your findings and submit your deliverable"
+        # Associates have generate_message_summary
+        return _generate_associate_directive(status, utilization, remaining)
+
+
+def _generate_partner_directive(
+    status: ContextBudgetStatus,
+    utilization: float,
+    remaining: int
+) -> str:
+    """Generate directive for Partner agents (no flow-control tools available)."""
+    if status == ContextBudgetStatus.WARNING:
+        return f"""
+⚠️ **CONTEXT BUDGET WARNING** ⚠️
+
+Your context utilization is at {utilization}% ({remaining:,} tokens remaining).
+
+**Action Required:**
+- Begin consolidating your conversation
+- Avoid launching new research tasks that would add more context
+- Focus on summarizing what has been accomplished so far
+- If research is in progress, allow it to complete but plan to wrap up soon
+
+Continue with your current interaction but prioritize reaching a natural conclusion.
+"""
+
+    elif status == ContextBudgetStatus.CRITICAL:
+        return f"""
+🚨 **CRITICAL: CONTEXT BUDGET EXHAUSTED** 🚨
+
+Your context utilization is at {utilization}% ({remaining:,} tokens remaining).
+
+**MANDATORY ACTION:**
+You must complete your current response concisely and advise the user that:
+- The conversation has reached its context limit
+- A new conversation may be needed for additional requests
+
+Do NOT launch any new research or make additional tool calls that would expand context.
+
+Provide a brief summary of what was accomplished and conclude this interaction.
+"""
+
+    elif status == ContextBudgetStatus.EXCEEDED:
+        return f"""
+🛑 **EMERGENCY: CONTEXT LIMIT EXCEEDED** 🛑
+
+Your context utilization is at {utilization}% - the system is at risk of failure.
+
+**EMERGENCY ACTION:**
+Provide a MINIMAL response to the user:
+1. Briefly state what was accomplished
+2. Inform them that the context limit has been reached
+3. Recommend starting a new conversation for further work
+
+This is your FINAL response opportunity before system failure.
+"""
+
+    return None
+
+
+def _generate_principal_directive(
+    status: ContextBudgetStatus,
+    utilization: float,
+    remaining: int
+) -> str:
+    """Generate directive for Principal agents (has finish_flow tool)."""
+    wrap_up_tool = "finish_flow"
+    wrap_up_action = "conclude your analysis and finalize results"
+
+    if status == ContextBudgetStatus.WARNING:
+        return f"""
+⚠️ **CONTEXT BUDGET WARNING** ⚠️
+
+Your context utilization is at {utilization}% ({remaining:,} tokens remaining).
+
+**Action Required:**
+- Begin consolidating your findings
+- Avoid dispatching additional submodules
+- Plan to call `{wrap_up_tool}` within the next 1-2 turns
+- If you have sufficient information, call `{wrap_up_tool}` NOW
+
+Continue with your current task but prioritize completion.
+"""
+
+    elif status == ContextBudgetStatus.CRITICAL:
+        return f"""
+🚨 **CRITICAL: CONTEXT BUDGET EXHAUSTED** 🚨
+
+Your context utilization is at {utilization}% ({remaining:,} tokens remaining).
+
+**MANDATORY ACTION:**
+You MUST call `{wrap_up_tool}` tool IMMEDIATELY to {wrap_up_action}.
+
+Do NOT dispatch any more submodules or make additional queries. Any additional work will cause a system failure.
+
+{wrap_up_action.capitalize()} NOW.
+"""
+
+    elif status == ContextBudgetStatus.EXCEEDED:
+        return f"""
+🛑 **EMERGENCY: CONTEXT LIMIT EXCEEDED** 🛑
+
+Your context utilization is at {utilization}% - the system is at risk of failure.
+
+**EMERGENCY ACTION:**
+Call `{wrap_up_tool}` IMMEDIATELY to {wrap_up_action}.
+
+Your response must be MINIMAL. Include only:
+1. A brief summary of completed work
+2. A note that full analysis was interrupted due to context limits
+
+This is your FINAL opportunity to submit work before system failure.
+"""
+
+    return None
+
+
+def _generate_associate_directive(
+    status: ContextBudgetStatus,
+    utilization: float,
+    remaining: int
+) -> str:
+    """Generate directive for Associate agents (has generate_message_summary tool)."""
+    wrap_up_tool = "generate_message_summary"
+    wrap_up_action = "summarize your findings and submit your deliverable"
 
     if status == ContextBudgetStatus.WARNING:
         return f"""
@@ -324,6 +471,9 @@ def should_force_tool_call(status: ContextBudgetStatus, agent_type: Optional[str
     force the agent to call the summary tool rather than relying on
     the directive alone.
 
+    NOTE: Only Principal and Associate agents have finish_flow in their toolset.
+    Partner agents do NOT have finish_flow - they should NOT be forced to call it.
+
     Args:
         status: The current ContextBudgetStatus
         agent_type: The agent type ("principal", "partner", "associate", etc.)
@@ -332,10 +482,14 @@ def should_force_tool_call(status: ContextBudgetStatus, agent_type: Optional[str
         Tool name to force, or None if no forced call needed
     """
     if status in (ContextBudgetStatus.CRITICAL, ContextBudgetStatus.EXCEEDED):
-        # Principal and Partner agents use finish_flow to wrap up
-        # Associates use generate_message_summary to submit deliverables
-        if agent_type in ("principal", "partner"):
+        # Principal agents use finish_flow to wrap up (they have flow_control_end toolset)
+        if agent_type == "principal":
             return "finish_flow"
+        # Partner agents do NOT have finish_flow in their toolset - return None
+        # They will receive guidance via the context_budget directive but not be forced
+        if agent_type == "partner":
+            return None
+        # Associates use generate_message_summary to submit deliverables
         return "generate_message_summary"
     return None
 

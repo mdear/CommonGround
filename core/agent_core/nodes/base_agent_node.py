@@ -17,6 +17,10 @@ from ..framework.context_budget_guardian import (
     should_force_tool_call,
     synthesize_partial_results
 )
+from ..framework.context_budget_handback import (
+    ContextBudgetHandback,
+    build_handback_from_context
+)
 import json_repair
 import os
 from typing import Dict, Any, Optional, List
@@ -759,32 +763,27 @@ class AgentNode(AsyncNode):
 
         # ===============================================================
         # CIRCUIT BREAKER: Skip LLM call if context budget exceeded
+        # Create handback for Principal instead of forcing tool call
         # ===============================================================
         if prep_res.get("skip_llm_call"):
             logger.warning(
-                "exec_async_skipped_due_to_context_budget",
+                "exec_async_circuit_breaker_handback",
                 extra={"agent_id": self.agent_id, "run_id": run_id}
             )
 
-            # Synthesize partial results from completed work
-            team_state = context.get('refs', {}).get('run', {}).get('team_state', {})
+            agent_type = prep_res.get("agent_type") or "associate"
             budget_metadata = context.get('state', {}).get('_context_budget', {})
 
-            synthesis = synthesize_partial_results(
-                team_state=team_state,
-                triggered_agent_id=self.agent_id,
-                budget_metadata=budget_metadata
-            )
-
-            # Return a synthetic response that forces flow completion
-            # Tool selection depends on agent type:
-            # - Principal/Partner: use finish_flow to wrap up the session
-            # - Associates: use generate_message_summary to submit deliverables
-            forced_tool_call_id = f"forced_circuit_breaker_{uuid.uuid4().hex[:8]}"
-            agent_type = prep_res.get("agent_type") or "associate"  # From profile's "type" field
-
-            if agent_type in ("principal", "partner"):
-                # Principal/Partner should gracefully end the flow with synthesis
+            if agent_type == "principal":
+                # Principal: use finish_flow approach (they have flow_control_end toolset)
+                team_state = context.get('refs', {}).get('run', {}).get('team_state', {})
+                synthesis = synthesize_partial_results(
+                    team_state=team_state,
+                    triggered_agent_id=self.agent_id,
+                    budget_metadata=budget_metadata
+                )
+                
+                forced_tool_call_id = f"forced_circuit_breaker_{uuid.uuid4().hex[:8]}"
                 forced_tool_name = "finish_flow"
                 forced_tool_args = {
                     "reason": f"Context budget exceeded ({budget_metadata.get('utilization_percent', '>70')}% utilization). Circuit breaker triggered.",
@@ -792,43 +791,108 @@ class AgentNode(AsyncNode):
                     "completed_modules": synthesis.get("summary", {}).get("completed", 0),
                     "incomplete_modules": synthesis.get("summary", {}).get("incomplete", 0)
                 }
-            else:
-                # Associates should submit their current findings
-                forced_tool_name = "generate_message_summary"
-                forced_tool_args = {
-                    "reason": f"Context budget exceeded ({budget_metadata.get('utilization_percent', '>70')}% utilization). Circuit breaker triggered.",
-                    "partial_work_summary": synthesis.get("user_message", "Work interrupted due to context limits.")
-                }
-
-            logger.info(
-                "circuit_breaker_tool_selected",
-                extra={
-                    "agent_id": self.agent_id,
-                    "agent_type": agent_type,
-                    "tool_name": forced_tool_name,
-                    "completed_modules": synthesis.get("summary", {}).get("completed", 0),
-                    "incomplete_modules": synthesis.get("summary", {}).get("incomplete", 0)
-                }
-            )
-
-            # Include the synthesis in the response content for user visibility
-            synthesis_content = synthesis.get("user_message", "")
-
-            return {
-                "content": f"[CONTEXT BUDGET EXCEEDED - Automatic {forced_tool_name} triggered]\n\n{synthesis_content}",
-                "tool_calls": [{
-                    "id": forced_tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": forced_tool_name,
-                        "arguments": json.dumps(forced_tool_args)
+                
+                logger.info(
+                    "circuit_breaker_tool_selected",
+                    extra={
+                        "agent_id": self.agent_id,
+                        "agent_type": agent_type,
+                        "tool_name": forced_tool_name,
+                        "completed_modules": synthesis.get("summary", {}).get("completed", 0),
+                        "incomplete_modules": synthesis.get("summary", {}).get("incomplete", 0)
                     }
-                }],
-                "reasoning": None,
-                "model_id_used": "circuit_breaker",
-                "error": None,
-                "circuit_breaker_synthesis": synthesis  # Include full synthesis for downstream processing
-            }
+                )
+                
+                return {
+                    "content": f"[CONTEXT BUDGET EXCEEDED - Automatic {forced_tool_name} triggered]\n\n{synthesis.get('user_message', '')}",
+                    "tool_calls": [{
+                        "id": forced_tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": forced_tool_name,
+                            "arguments": json.dumps(forced_tool_args)
+                        }
+                    }],
+                    "reasoning": None,
+                    "model_id_used": "circuit_breaker",
+                    "error": None,
+                    "circuit_breaker_synthesis": synthesis
+                }
+            elif agent_type == "partner":
+                # Partner: does NOT have finish_flow - return a message to the user instead
+                # Synthesize partial results and return as content without forcing a tool call
+                team_state = context.get('refs', {}).get('run', {}).get('team_state', {})
+                synthesis = synthesize_partial_results(
+                    team_state=team_state,
+                    triggered_agent_id=self.agent_id,
+                    budget_metadata=budget_metadata
+                )
+                
+                utilization = budget_metadata.get('utilization_percent', '>85')
+                user_message = (
+                    f"⚠️ **Context Budget Limit Reached** ({utilization}% utilization)\n\n"
+                    f"I've accumulated too much conversation history to continue safely. "
+                    f"To proceed with your request, please start a new conversation.\n\n"
+                    f"**What was completed:**\n{synthesis.get('user_message', 'Partial results available.')}"
+                )
+                
+                logger.info(
+                    "circuit_breaker_partner_message",
+                    extra={
+                        "agent_id": self.agent_id,
+                        "agent_type": agent_type,
+                        "utilization_percent": utilization,
+                        "completed_modules": synthesis.get("summary", {}).get("completed", 0),
+                        "incomplete_modules": synthesis.get("summary", {}).get("incomplete", 0)
+                    }
+                )
+                
+                return {
+                    "content": user_message,
+                    "tool_calls": [],  # No tool call - just return the message
+                    "reasoning": None,
+                    "model_id_used": "circuit_breaker",
+                    "error": None,
+                    "circuit_breaker_synthesis": synthesis
+                }
+            else:
+                # Associates: Build handback for Principal summarization
+                # This avoids the infinite loop caused by forcing generate_message_summary
+                profile_name = self.loaded_profile.get("name", "unknown") if self.loaded_profile else "unknown"
+                handback = build_handback_from_context(
+                    agent_id=self.agent_id,
+                    context=context,
+                    prep_res=prep_res,
+                    profile_name=profile_name
+                )
+                
+                # Store handback in deliverables for Principal to access
+                context["state"].setdefault("deliverables", {})
+                context["state"]["deliverables"]["_handback"] = handback.to_dict()
+                context["state"]["deliverables"]["status"] = "CONTEXT_BUDGET_EXCEEDED"
+                context["state"]["deliverables"]["primary_summary"] = handback.get_deliverables_summary()
+                
+                logger.info(
+                    "circuit_breaker_handback_created",
+                    extra={
+                        "agent_id": self.agent_id,
+                        "agent_type": agent_type,
+                        "kb_tokens_collected": handback.kb_token_count,
+                        "tool_calls_completed": len(handback.tool_calls_completed),
+                        "utilization_percent": handback.utilization_percent
+                    }
+                )
+                
+                # Return with END_FLOW signal - no tool call to avoid loop
+                return {
+                    "content": handback.get_principal_summary_prompt(),
+                    "tool_calls": [],  # NO tool call - avoid the infinite loop
+                    "reasoning": None,
+                    "model_id_used": "circuit_breaker_handback",
+                    "error": None,
+                    "_flow_action": "END_FLOW",  # Signal to post_async
+                    "_handback": handback.to_dict()
+                }
         # ===============================================================
 
         # Create a placeholder message ID
@@ -917,6 +981,28 @@ class AgentNode(AsyncNode):
         next_action = "error_in_post"
 
         try:
+            # ===============================================================
+            # CIRCUIT BREAKER HANDBACK: Immediate termination on END_FLOW
+            # ===============================================================
+            if exec_res.get("_flow_action") == "END_FLOW":
+                logger.info(
+                    "circuit_breaker_handback_terminating",
+                    extra={
+                        "agent_id": self.agent_id,
+                        "has_handback": "_handback" in exec_res
+                    }
+                )
+                # Update assistant message with handback content
+                self._update_assistant_message_in_state(state, exec_res)
+                
+                # Ensure turn is properly finalized
+                if turn_manager:
+                    turn_manager.update_llm_interaction_end(context, exec_res)
+                
+                # Clean termination - no more turns
+                return "END_FLOW"
+            # ===============================================================
+
             if "error" in llm_response and llm_response["error"]:
                 error_message = llm_response["error"]
                 logger.error("post_processing_llm_error", extra={"agent_id": self.agent_id, "error_message": error_message}, exc_info=True)

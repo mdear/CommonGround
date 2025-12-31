@@ -17,15 +17,15 @@ def get_jina_key():
         logger.error("JINA_KEY environment variable is not set")
     return jina_key
 
-def test_jina_search(query="PocketFlow"):
+def check_jina_search(query="PocketFlow"):
     """
-    Test the Jina Search API connection.
+    Check the Jina Search API connection.
     
     Args:
         query (str, optional): The test search query. Defaults to "PocketFlow".
     
     Returns:
-        bool: Whether the connection test was successful.
+        bool: Whether the connection check was successful.
     """
     jina_key = get_jina_key()
     if not jina_key:
@@ -51,15 +51,15 @@ def test_jina_search(query="PocketFlow"):
         logger.error("jina_search_api_test_error", extra={"error_message": str(e)})
         return False
 
-def test_jina_visit(url="github.com"):
+def check_jina_visit(url="github.com"):
     """
-    Test the Jina URL Visit API connection.
+    Check the Jina URL Visit API connection.
     
     Args:
         url (str, optional): The test URL to visit. Defaults to "github.com".
     
     Returns:
-        bool: Whether the connection test was successful.
+        bool: Whether the connection check was successful.
     """
     jina_key = get_jina_key()
     if not jina_key:
@@ -92,5 +92,5 @@ if __name__ == "__main__":
     )
     
     # Test Jina API
-    print("Testing Jina Search API:", "Success" if test_jina_search() else "Failure")
-    print("Testing Jina Visit API:", "Success" if test_jina_visit() else "Failure")
+    print("Testing Jina Search API:", "Success" if check_jina_search() else "Failure")
+    print("Testing Jina Visit API:", "Success" if check_jina_visit() else "Failure")

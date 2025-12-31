@@ -41,8 +41,19 @@ class DuckDBRAGStore:
         )
         logger.info("duckdb_rag_store_initialized", extra={"database_name": os.path.basename(self.db_file), "embedding_model_id": emb_cfg.get('emb_model_id')})
         
-        # Asynchronously initialize or check the database
-        asyncio.create_task(self._initialize_or_check_database())
+        # Track initialization state - lazy initialization to avoid unawaited coroutine warnings
+        self._initialized = False
+        self._init_lock = asyncio.Lock()
+
+    async def _ensure_initialized(self):
+        """Ensure the database is initialized before any operations. Thread-safe and idempotent."""
+        if self._initialized:
+            return
+        async with self._init_lock:
+            if self._initialized:  # Double-check after acquiring lock
+                return
+            await self._initialize_or_check_database()
+            self._initialized = True
 
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
         """Synchronously gets a database connection."""
@@ -137,6 +148,7 @@ class DuckDBRAGStore:
 
     async def add_text_chunk(self, chunk_text: str, project_id: str, doc_id: str = None, url: str = None, meta: str = None, tags: list = None) -> Optional[int]:
         """Asynchronously adds a new text chunk to the metadata table."""
+        await self._ensure_initialized()
         if not chunk_text:
             raise ValueError("chunk_text cannot be empty.")
         if not self.config.get('database_writable', False):
@@ -166,6 +178,7 @@ class DuckDBRAGStore:
 
     async def process_pending_embeddings(self, batch_size: int = 50):
         """Asynchronously generates and stores embeddings for pending text chunks."""
+        await self._ensure_initialized()
         if not self.config.get('database_writable', False):
             raise PermissionError(f"Data source '{self.config.get('source_name')}' is read-only, 'process_pending_embeddings' operation is not allowed.")
         
@@ -216,6 +229,7 @@ class DuckDBRAGStore:
 
     async def vector_search_text(self, query_text: str, project_id: str, top_k: int = 5, tags: Optional[List[str]] = None) -> List[Dict]:
         """Asynchronously performs a vector search across multiple embedding columns (available for all sources)."""
+        await self._ensure_initialized()
         if not query_text or not project_id: return []
 
         is_global_source = self.config.get('is_global', False)

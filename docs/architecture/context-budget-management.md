@@ -121,7 +121,7 @@ def work_modules_ingestor(payload: Any, params: Dict, context: Dict) -> str:
 
 **File**: `core/agent_core/framework/context_budget_guardian.py`
 
-The guardian already supports 1M context detection. Key behaviors:
+The guardian supports 1M context detection and provides agent-type-aware handling. Key behaviors:
 
 1. **Priority Resolution**:
    - First: Check explicit `max_context_tokens` in config
@@ -129,10 +129,29 @@ The guardian already supports 1M context detection. Key behaviors:
    - Third: Model family defaults
    - Fourth: Conservative 100K default
 
-2. **Thresholds** (already implemented):
-   - WARNING: 40% - Start suggesting wrap-up
-   - CRITICAL: 55% - Force completion
-   - EXCEEDED: 70% - Circuit breaker, 30% remains for wrap-up
+2. **Thresholds**:
+   - HEALTHY: <60% - Normal operation
+   - WARNING: 60-75% - Inject guidance directive to wrap up
+   - CRITICAL: 75-85% - Force completion (for agents with flow-ending tools)
+   - EXCEEDED: >85% - Circuit breaker fires, 15% remains for wrap-up
+
+3. **Agent-Type-Aware Behavior**:
+
+   | Agent Type | WARNING | CRITICAL | EXCEEDED |
+   |------------|---------|----------|----------|
+   | **Principal** | Directive: "call `finish_flow`" | Forces `finish_flow` | Circuit breaker → `finish_flow` + synthesis |
+   | **Partner** | Directive: "wrap up response" | Guidance only (no forcing) | Circuit breaker → user message |
+   | **Associate** | Directive: "call `generate_message_summary`" | Forces `generate_message_summary` | Circuit breaker → handback for Principal |
+
+   **Key Design Insight**: Partner agents do NOT have `finish_flow` or `generate_message_summary` in their toolset, so:
+   - They receive increasingly urgent guidance directives at WARNING/CRITICAL
+   - They CANNOT be forced to call a non-existent tool
+   - At EXCEEDED, they return a user-visible message explaining the limit was reached
+
+4. **Handback Behavior** (Associates only):
+   - When an Associate hits EXCEEDED, it packages its collected work (KB tokens, tool history, partial findings) into a `ContextBudgetHandback` structure
+   - This handback is stored in `deliverables._handback` for Principal to access
+   - Principal can expand KB tokens and summarize the partial work itself
 
 ### 2.1 Provider-Aware Token Counting
 
@@ -244,7 +263,7 @@ Add to `fim_protocol`:
 ```yaml
 fim_protocol:
   trigger_conditions:
-    budget_threshold_percent: 70
+    budget_threshold_percent: 75  # Aligns with CRITICAL threshold
     max_turns_without_fim: 5
 
   mandatory_deliverable_check:
@@ -321,11 +340,12 @@ ANTHROPIC_EXTRA_HEADERS={"anthropic-beta": "context-1m-2025-08-07"}
 
 ## Implementation Priority
 
-1. **[CRITICAL] Fix work_modules_ingestor** - Immediate token reduction
+1. **[CRITICAL] Fix work_modules_ingestor** - Immediate token reduction (DONE ✓)
 2. **[HIGH] Verify 1M context** - Safety net (DONE ✓)
-3. **[HIGH] Graceful circuit breaker** - Better failure recovery
-4. **[MEDIUM] Deliverable enforcement** - Data quality
-5. **[LOW] Tool docstring optimization** - Long-term token savings
+3. **[HIGH] Graceful circuit breaker** - Better failure recovery (DONE ✓)
+4. **[HIGH] Agent-type-aware handling** - Respect Partner/Principal/Associate capabilities (DONE ✓)
+5. **[MEDIUM] Deliverable enforcement** - Data quality (fim_protocol not yet implemented)
+6. **[LOW] Tool docstring optimization** - Long-term token savings
 
 ## Monitoring & Alerts
 
@@ -333,21 +353,22 @@ The system should log warnings when:
 
 1. Single work module exceeds 10K tokens when serialized
 2. Total work_modules payload exceeds 50K tokens
-3. Context utilization exceeds WARNING threshold (40%)
+3. Context utilization exceeds WARNING threshold (60%)
 4. Any agent completes with 0 deliverables
 5. Circuit breaker fires (should be exceptional, not routine)
+6. Partner agent reaches EXCEEDED without graceful completion
 
 ## Testing Checklist
 
-- [ ] Verify 1M context enabled: `extra_headers` resolved correctly
-- [ ] Verify `max_context_tokens: 1000000` in resolved config
-- [ ] Verify work_modules_ingestor excludes context_archive
-- [ ] Test circuit breaker synthesizes partial results
-- [ ] Confirm deliverable capture enforcement works
+- [x] Verify 1M context enabled: `extra_headers` resolved correctly *(test_context_budget_guardian.py)*
+- [x] Verify `max_context_tokens: 1000000` in resolved config *(test_context_budget_guardian.py)*
+- [x] Verify work_modules_ingestor excludes context_archive *(test_ingestors.py)*
+- [x] Test circuit breaker synthesizes partial results *(implemented in context_budget_guardian.py)*
+- [ ] Confirm deliverable capture enforcement works *(fim_protocol not yet implemented)*
 - [ ] Load test with complex multi-module scenario
-- [ ] Verify inheritance budget computation works correctly
-- [ ] Test content selection uses LLM summary when available
-- [ ] Confirm hydration occurs before selection (not after)
+- [x] Verify inheritance budget computation works correctly *(test_content_selection.py)*
+- [x] Test content selection uses LLM summary when available *(test_content_selection.py)*
+- [x] Confirm hydration occurs before selection (not after) *(test_content_selection.py)*
 
 ---
 

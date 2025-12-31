@@ -32,20 +32,20 @@ class TestContextBudgetThresholds:
         assert WARNING_THRESHOLD < CRITICAL_THRESHOLD < EXCEEDED_THRESHOLD
 
     def test_thresholds_leave_headroom(self):
-        """EXCEEDED threshold should leave at least 30% headroom."""
-        assert EXCEEDED_THRESHOLD <= 0.70
+        """EXCEEDED threshold should leave at least 15% headroom."""
+        assert EXCEEDED_THRESHOLD <= 0.85
 
     def test_warning_threshold_value(self):
-        """WARNING should trigger at 40%."""
-        assert WARNING_THRESHOLD == 0.40
+        """WARNING should trigger at 60%."""
+        assert WARNING_THRESHOLD == 0.60
 
     def test_critical_threshold_value(self):
-        """CRITICAL should trigger at 55%."""
-        assert CRITICAL_THRESHOLD == 0.55
+        """CRITICAL should trigger at 75%."""
+        assert CRITICAL_THRESHOLD == 0.75
 
     def test_exceeded_threshold_value(self):
-        """EXCEEDED should trigger at 70%."""
-        assert EXCEEDED_THRESHOLD == 0.70
+        """EXCEEDED should trigger at 85%."""
+        assert EXCEEDED_THRESHOLD == 0.85
 
 
 class TestGetModelContextLimit:
@@ -132,14 +132,14 @@ class TestCalculateWorkerBudget:
         # Total available = 200000 - 30000 overhead = 170000
         assert result["total_available"] == 170000
 
-        # Summarization = 30% of 170000 = 51000
-        assert result["summarization_budget"] == 51000
+        # Summarization = 15% of 170000 = 25500
+        assert result["summarization_budget"] == 25500
 
-        # Worker total = 170000 - 51000 = 119000
-        assert result["worker_budget_total"] == 119000
+        # Worker total = 170000 - 25500 = 144500
+        assert result["worker_budget_total"] == 144500
 
-        # Per worker = 119000 / 3 = 39666
-        assert result["per_worker_budget"] == 39666
+        # Per worker = 144500 / 3 = 48166
+        assert result["per_worker_budget"] == 48166
 
     def test_single_worker(self):
         """Single worker should get full worker budget."""
@@ -207,36 +207,36 @@ class TestAssessContextBudget:
         assert "Healthy" in metadata["recommendation"]
 
     def test_warning_status(self):
-        """40-55% should be WARNING."""
+        """60-75% should be WARNING."""
         status, metadata = assess_context_budget(
-            predicted_tokens=90000,  # 45% of 200K
+            predicted_tokens=130000,  # 65% of 200K
             model_name="anthropic/claude-sonnet-4"
         )
 
         assert status == ContextBudgetStatus.WARNING
-        assert metadata["utilization_percent"] == 45.0
+        assert metadata["utilization_percent"] == 65.0
         assert "WARNING" in metadata["recommendation"]
 
     def test_critical_status(self):
-        """55-70% should be CRITICAL."""
+        """75-85% should be CRITICAL."""
         status, metadata = assess_context_budget(
-            predicted_tokens=120000,  # 60% of 200K
+            predicted_tokens=160000,  # 80% of 200K
             model_name="anthropic/claude-sonnet-4"
         )
 
         assert status == ContextBudgetStatus.CRITICAL
-        assert metadata["utilization_percent"] == 60.0
+        assert metadata["utilization_percent"] == 80.0
         assert "CRITICAL" in metadata["recommendation"]
 
     def test_exceeded_status(self):
-        """Over 70% should be EXCEEDED."""
+        """Over 85% should be EXCEEDED."""
         status, metadata = assess_context_budget(
-            predicted_tokens=150000,  # 75% of 200K
+            predicted_tokens=180000,  # 90% of 200K
             model_name="anthropic/claude-sonnet-4"
         )
 
         assert status == ContextBudgetStatus.EXCEEDED
-        assert metadata["utilization_percent"] == 75.0
+        assert metadata["utilization_percent"] == 90.0
         assert "EMERGENCY" in metadata["recommendation"]
 
     def test_metadata_includes_all_fields(self):
@@ -265,18 +265,18 @@ class TestAssessContextBudget:
         assert metadata["remaining_tokens"] == 150000
 
     def test_boundary_at_warning_threshold(self):
-        """Exactly at 40% should be WARNING."""
+        """Exactly at 60% should be WARNING."""
         status, _ = assess_context_budget(
-            predicted_tokens=80000,  # 40% of 200K
+            predicted_tokens=120000,  # 60% of 200K
             model_name="anthropic/claude-sonnet-4"
         )
 
         assert status == ContextBudgetStatus.WARNING
 
     def test_just_under_warning_threshold(self):
-        """Just under 40% should be HEALTHY."""
+        """Just under 60% should be HEALTHY."""
         status, _ = assess_context_budget(
-            predicted_tokens=79000,  # 39.5% of 200K
+            predicted_tokens=119000,  # 59.5% of 200K
             model_name="anthropic/claude-sonnet-4"
         )
 

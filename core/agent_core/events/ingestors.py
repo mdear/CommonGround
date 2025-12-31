@@ -153,9 +153,41 @@ def work_modules_ingestor(payload: Any, params: Dict, context: Dict) -> str:
         'new_messages_from_associate',  # Associate work history
     }
 
+    def _get_deliverables_summary(module_data: dict) -> str:
+        """
+        Get deliverables summary, checking BOTH top-level deliverables[] AND context_archive.
+        
+        The system stores actual deliverables in context_archive[].deliverables.primary_summary,
+        but the legacy work_modules[].deliverables[] array often stays empty. This function
+        checks both locations to give accurate status to the Principal.
+        """
+        # First check top-level deliverables field
+        top_level = module_data.get('deliverables')
+        if top_level:
+            if isinstance(top_level, dict):
+                return f"({len(top_level)} items)"
+            elif isinstance(top_level, list) and len(top_level) > 0:
+                return f"({len(top_level)} items)"
+            elif top_level:  # Some other truthy value
+                return "(present)"
+        
+        # Check context_archive for deliverables (this is where they actually live)
+        context_archive = module_data.get('context_archive', [])
+        if context_archive:
+            for archive in context_archive:
+                if isinstance(archive, dict):
+                    archive_deliverables = archive.get('deliverables', {})
+                    if isinstance(archive_deliverables, dict):
+                        primary_summary = archive_deliverables.get('primary_summary', '')
+                        if primary_summary:
+                            # Return char count to indicate deliverables exist
+                            return f"(in archive: {len(primary_summary):,} chars)"
+        
+        return "(none)"
+
     # Fields to SUMMARIZE (show counts/metadata only)
     SUMMARIZE_FIELDS = {
-        'deliverables': lambda v: f"({len(v)} items)" if isinstance(v, dict) else "(present)" if v else "(none)",
+        'deliverables': None,  # Handled specially by _get_deliverables_summary
         'tools_used': lambda v: ', '.join(v[:5]) + ('...' if len(v) > 5 else '') if isinstance(v, list) else str(v),
     }
 
@@ -171,7 +203,10 @@ def work_modules_ingestor(payload: Any, params: Dict, context: Dict) -> str:
                         "approx_size": len(str(value))
                     })
                 continue
-            if key in SUMMARIZE_FIELDS:
+            if key == 'deliverables':
+                # Use special handler that checks both locations
+                filtered[key] = _get_deliverables_summary(module_data)
+            elif key in SUMMARIZE_FIELDS and SUMMARIZE_FIELDS[key]:
                 filtered[key] = SUMMARIZE_FIELDS[key](value)
             elif isinstance(value, dict) and len(str(value)) > 5000:
                 # Recursively filter nested dicts that are too large

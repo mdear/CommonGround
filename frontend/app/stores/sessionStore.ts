@@ -3,8 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { CSSProperties } from 'react';
 import { selectionStore } from './selectionStore'; // Import selectionStore
 import { config } from '@/app/config';
-import { ProjectService } from '@/lib/api';
-import { getSessionManager, SessionManager, SessionTokens } from '@/lib/sessionManager';
+import { getSessionManager, SessionManager } from '@/lib/sessionManager';
 import type { Turn as OriginalTurn, ToolInteraction } from '@/app/chat/types/conversation'; // <-- New import
 
 // Define the shape of `llm_interaction` as we expect it, including `actual_usage`.

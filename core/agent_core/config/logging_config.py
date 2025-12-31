@@ -2,7 +2,6 @@
 import logging
 import sys
 import os
-from pythonjsonlogger import jsonlogger
 from contextvars import ContextVar, copy_context
 import asyncio
 

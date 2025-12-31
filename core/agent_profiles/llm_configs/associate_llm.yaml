@@ -14,5 +14,8 @@ config:
     var: "AGENT_TEMPERATURE"
     default: 0.4
     required: false
+  # Limit output tokens to prevent context overflow (input + max_tokens must be < 200K)
+  # Associates produce tool calls and summaries, not long documents - 16K is ample
+  max_tokens: 16384
   max_retries: 2
   wait_seconds_on_retry: 3

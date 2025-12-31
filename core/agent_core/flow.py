@@ -223,20 +223,91 @@ async def run_associate_async(associate_context: dict):
             final_state["deliverables"] = {}
             logger.debug("associate_deliverables_initialized", extra={"executing_associate_id": executing_associate_id})
         
+        # ===============================================================
+        # HANDLE CONTEXT BUDGET HANDBACK
+        # If agent exceeded context budget, update dispatch history with handback
+        # ===============================================================
+        deliverables = final_state.get("deliverables", {})
+        if deliverables.get("status") == "CONTEXT_BUDGET_EXCEEDED":
+            team_state = associate_context['refs']['team']
+            handback_data = deliverables.get("_handback", {})
+            
+            # Find and update the dispatch history entry
+            for entry in reversed(team_state.get("dispatch_history", [])):
+                if entry.get("dispatch_id") == executing_associate_id:
+                    entry["status"] = "PARTIAL_HANDBACK"
+                    entry["handback"] = handback_data
+                    entry["end_timestamp"] = datetime.now(timezone.utc).isoformat()
+                    entry["termination_reason"] = "context_budget_exceeded"
+                    
+                    logger.info("dispatcher_history_updated_handback", extra={
+                        "dispatch_id": executing_associate_id,
+                        "new_status": "PARTIAL_HANDBACK",
+                        "kb_tokens_available": handback_data.get("kb_token_count", 0),
+                        "tool_calls_completed": len(handback_data.get("tool_calls_completed", []))
+                    })
+                    break
+            
+            # Notify Principal of handback if context available
+            try:
+                from .framework.context_budget_handback import (
+                    ContextBudgetHandback,
+                    notify_principal_of_handback
+                )
+                
+                # Find Principal context through refs
+                principal_context = associate_context.get('refs', {}).get('run', {}).get('principal_context')
+                if principal_context and handback_data:
+                    handback = ContextBudgetHandback.from_dict(handback_data)
+                    notify_principal_of_handback(principal_context, handback)
+                    logger.info("principal_notified_of_handback", extra={
+                        "executing_associate_id": executing_associate_id,
+                        "principal_inbox_items": len(principal_context.get("state", {}).get("inbox", []))
+                    })
+            except Exception as e:
+                logger.warning("principal_handback_notification_failed", extra={
+                    "executing_associate_id": executing_associate_id,
+                    "error": str(e)
+                })
+        # ===============================================================
+        
         return associate_context
 
     except asyncio.CancelledError:
         # ... (CancelledError handling logic remains unchanged) ...
         cancel_msg = f"Associate flow (Agent ID: {executing_associate_id}, Run ID: {current_run_id}) was cancelled."
         logger.info("associate_flow_cancelled", extra={"executing_associate_id": executing_associate_id, "run_id": current_run_id})
+        
+        # Update dispatch history with cancellation info
+        team_state_from_refs = associate_context['refs']['team']
+        if history_entry := next((h for h in reversed(team_state_from_refs.get("dispatch_history", [])) if h.get("dispatch_id") == executing_associate_id), None):
+            history_entry["_flow_cancelled"] = True
+            history_entry["_flow_cancelled_at"] = datetime.now(timezone.utc).isoformat()
+        
         final_state = associate_context.setdefault("state", {})
         final_state["error_message"] = cancel_msg
         final_state.setdefault("deliverables", {})["error"] = "Flow was cancelled."
         return associate_context
     except Exception as e:
-        # ... (Exception handling logic remains unchanged) ...
+        # Enhanced exception handling with structured logging
         error_msg = f"Associate flow error (Agent ID: {executing_associate_id}, Run ID: {current_run_id}): {str(e)}"
-        logger.error("associate_flow_error", extra={"executing_associate_id": executing_associate_id, "run_id": current_run_id, "error_message": str(e)}, exc_info=True)
+        logger.error("associate_flow_error", extra={
+            "executing_associate_id": executing_associate_id, 
+            "run_id": current_run_id, 
+            "error_message": str(e),
+            "error_type": type(e).__name__,
+            "module_id": associate_meta.get("module_id"),
+            "profile": profile_logical_name_used,
+        }, exc_info=True)
+        
+        # Update dispatch history with detailed error info
+        team_state_from_refs = associate_context['refs']['team']
+        if history_entry := next((h for h in reversed(team_state_from_refs.get("dispatch_history", [])) if h.get("dispatch_id") == executing_associate_id), None):
+            history_entry["_flow_error"] = True
+            history_entry["_flow_error_at"] = datetime.now(timezone.utc).isoformat()
+            history_entry["_flow_error_type"] = type(e).__name__
+            history_entry["_flow_error_message"] = str(e)[:500]  # Truncate for storage
+        
         final_state = associate_context.setdefault("state", {})
         final_state["error_message"] = error_msg
         final_state.setdefault("deliverables", {})["error"] = f"Flow execution failed: {str(e)}"
@@ -248,6 +319,13 @@ async def run_associate_async(associate_context: dict):
             await release_mcp_session_to_pool(mcp_session_to_release)
             del associate_context["runtime_objects"]["mcp_session_group"]
         # --- END: Modified code ---
+        
+        # Instrumentation: Track flow finalization in dispatch history
+        team_state_from_refs = associate_context.get('refs', {}).get('team', {})
+        if history_entry := next((h for h in reversed(team_state_from_refs.get("dispatch_history", [])) if h.get("dispatch_id") == executing_associate_id), None):
+            history_entry["_finally_block_executed"] = True
+            history_entry["_finally_block_at"] = datetime.now(timezone.utc).isoformat()
+        
         # Removed all mcp_session_group cleanup logic
         executing_associate_id_for_log = associate_context.get("meta", {}).get("agent_id", "UnknownAssociate")
         current_run_id_for_log = associate_context.get('meta', {}).get('run_id', 'UnknownRun')

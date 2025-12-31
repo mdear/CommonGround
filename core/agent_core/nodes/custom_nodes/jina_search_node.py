@@ -47,6 +47,7 @@ class JinaSearchNode(BaseToolNode):
             jina_key = get_jina_key()
             if not jina_key:
                 error_message = "JINA_KEY environment variable is not set"
+                logger.error("jina_api_key_missing", extra={"query": query})
             else:
                 api_url = f'https://s.jina.ai/?q={query}'
                 headers = {'Authorization': f'Bearer {jina_key}', 'X-Respond-With': 'no-content', 'Accept': 'application/json'}
@@ -61,10 +62,32 @@ class JinaSearchNode(BaseToolNode):
                         else:
                             error_text = await response.text()
                             error_message = f"Search engine returned an error: HTTP {response.status} - {error_text}"
+                            # Log with appropriate severity based on error type
+                            if response.status == 402:
+                                logger.error("jina_api_insufficient_balance", extra={
+                                    "query": query,
+                                    "http_status": response.status,
+                                    "error_detail": error_text,
+                                    "action_required": "Recharge Jina API account at https://jina.ai"
+                                })
+                            elif response.status == 429:
+                                logger.warning("jina_api_rate_limited", extra={
+                                    "query": query,
+                                    "http_status": response.status,
+                                    "error_detail": error_text
+                                })
+                            else:
+                                logger.error("jina_api_error", extra={
+                                    "query": query,
+                                    "http_status": response.status,
+                                    "error_detail": error_text
+                                })
         except asyncio.TimeoutError:
             error_message = "Search query timed out"
+            logger.warning("jina_api_timeout", extra={"query": query})
         except Exception as e:
             error_message = f"Search error: {str(e)}"
+            logger.error("jina_api_exception", extra={"query": query, "error": str(e)})
 
         # Prepare content for the LLM
         main_content_for_llm = {

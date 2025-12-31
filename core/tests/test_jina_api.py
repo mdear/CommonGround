@@ -6,8 +6,8 @@ and URL content retrieval.
 
 Key functionality tested:
 - get_jina_key: Environment variable retrieval
-- test_jina_search: Search API connectivity test
-- test_jina_visit: URL visit API connectivity test
+- check_jina_search: Search API connectivity check
+- check_jina_visit: URL visit API connectivity check
 """
 
 import pytest
@@ -15,8 +15,8 @@ import os
 from unittest.mock import patch, MagicMock
 from agent_core.services.jina_api import (
     get_jina_key,
-    test_jina_search,
-    test_jina_visit,
+    check_jina_search,
+    check_jina_visit,
 )
 
 
@@ -53,12 +53,12 @@ class TestGetJinaKey:
 
 
 class TestJinaSearchAPI:
-    """Tests for test_jina_search function."""
+    """Tests for check_jina_search function."""
 
     def test_returns_false_when_no_api_key(self):
         """Test returns False when API key not available."""
         with patch.dict(os.environ, {}, clear=True):
-            result = test_jina_search()
+            result = check_jina_search()
 
         assert result is False
 
@@ -70,7 +70,7 @@ class TestJinaSearchAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "valid-key"}):
-            result = test_jina_search()
+            result = check_jina_search()
 
         assert result is True
         mock_get.assert_called_once()
@@ -83,7 +83,7 @@ class TestJinaSearchAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "invalid-key"}):
-            result = test_jina_search()
+            result = check_jina_search()
 
         assert result is False
 
@@ -93,7 +93,7 @@ class TestJinaSearchAPI:
         mock_get.side_effect = Exception("Network error")
 
         with patch.dict(os.environ, {"JINA_KEY": "valid-key"}):
-            result = test_jina_search()
+            result = check_jina_search()
 
         assert result is False
 
@@ -105,7 +105,7 @@ class TestJinaSearchAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "key"}):
-            test_jina_search(query="test query")
+            check_jina_search(query="test query")
 
         call_url = mock_get.call_args[0][0]
         assert "s.jina.ai" in call_url
@@ -119,7 +119,7 @@ class TestJinaSearchAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "my-api-key"}):
-            test_jina_search()
+            check_jina_search()
 
         call_headers = mock_get.call_args[1]["headers"]
         assert "Authorization" in call_headers
@@ -127,12 +127,12 @@ class TestJinaSearchAPI:
 
 
 class TestJinaVisitAPI:
-    """Tests for test_jina_visit function."""
+    """Tests for check_jina_visit function."""
 
     def test_returns_false_when_no_api_key(self):
         """Test returns False when API key not available."""
         with patch.dict(os.environ, {}, clear=True):
-            result = test_jina_visit()
+            result = check_jina_visit()
 
         assert result is False
 
@@ -144,7 +144,7 @@ class TestJinaVisitAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "valid-key"}):
-            result = test_jina_visit()
+            result = check_jina_visit()
 
         assert result is True
 
@@ -156,7 +156,7 @@ class TestJinaVisitAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "key"}):
-            result = test_jina_visit()
+            result = check_jina_visit()
 
         assert result is False
 
@@ -166,7 +166,7 @@ class TestJinaVisitAPI:
         mock_get.side_effect = ConnectionError("Failed to connect")
 
         with patch.dict(os.environ, {"JINA_KEY": "valid-key"}):
-            result = test_jina_visit()
+            result = check_jina_visit()
 
         assert result is False
 
@@ -178,7 +178,7 @@ class TestJinaVisitAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "key"}):
-            test_jina_visit(url="example.com/page")
+            check_jina_visit(url="example.com/page")
 
         call_url = mock_get.call_args[0][0]
         assert "r.jina.ai" in call_url
@@ -192,7 +192,7 @@ class TestJinaVisitAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "secret-key"}):
-            test_jina_visit()
+            check_jina_visit()
 
         call_headers = mock_get.call_args[1]["headers"]
         assert "Authorization" in call_headers
@@ -206,7 +206,7 @@ class TestJinaVisitAPI:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "key"}):
-            test_jina_visit()  # No url parameter
+            check_jina_visit()  # No url parameter
 
         call_url = mock_get.call_args[0][0]
         assert "github.com" in call_url
@@ -223,7 +223,7 @@ class TestDefaultParameters:
         mock_get.return_value = mock_response
 
         with patch.dict(os.environ, {"JINA_KEY": "key"}):
-            test_jina_search()  # No query parameter
+            check_jina_search()  # No query parameter
 
         call_url = mock_get.call_args[0][0]
         assert "PocketFlow" in call_url

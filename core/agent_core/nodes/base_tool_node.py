@@ -68,6 +68,7 @@ class BaseToolNode(AsyncNode):
     async def post_async(self, shared: Dict, prep_res: Dict, exec_res: Dict):
         """
         [Refactored] Generic post-processing stage.
+        - PRE-ADMISSION CHECK: Prevents context spikes from large tool results
         - Handles knowledge base items declared in exec_res.
         - Intelligently dehydrates the payload.
         - Wraps the result in a TOOL_RESULT event.
@@ -76,7 +77,84 @@ class BaseToolNode(AsyncNode):
         state = shared.get("state", {})
         is_error = exec_res.get("status") == "error"
 
-        # --- START: New knowledge base handling logic ---
+        # ===============================================================
+        # PRE-ADMISSION BUDGET CHECK: Prevent context spikes
+        # If tool result would push context past WARNING threshold,
+        # truncate intelligently and defer excess to KB
+        # ===============================================================
+        if not is_error and (exec_res.get("_knowledge_items_to_add") or exec_res.get("payload")):
+            try:
+                from ..framework.context_admission_controller import check_pre_admission, estimate_tokens
+                
+                # Get model info first - try multiple sources
+                llm_config = {}
+                run_refs = shared.get("refs", {}).get("run", {})
+                config = run_refs.get("config", {})
+                
+                # Try to get model from llm_configs
+                llm_configs = config.get("llm_configs", {})
+                if isinstance(llm_configs, dict):
+                    # Get the associate config or first available
+                    for key in ["associate_llm", "default", "principal_llm"]:
+                        if key in llm_configs:
+                            llm_config = llm_configs[key]
+                            break
+                    if not llm_config and llm_configs:
+                        llm_config = next(iter(llm_configs.values()), {})
+                
+                model_name = llm_config.get("model", "anthropic/claude-sonnet-4-20250514")
+                agent_id = shared.get("meta", {}).get("agent_id")
+                
+                # Estimate current context tokens from messages using accurate counting
+                messages = state.get("messages", [])
+                current_tokens = 0
+                for msg in messages:
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        current_tokens += estimate_tokens(content, model=model_name)
+                    # Add overhead for tool calls
+                    if msg.get("tool_calls"):
+                        current_tokens += estimate_tokens(str(msg["tool_calls"]), model=model_name)
+                
+                # Check admission
+                admission = check_pre_admission(
+                    tool_result=exec_res,
+                    current_context_tokens=current_tokens,
+                    model_name=model_name,
+                    llm_config=llm_config,
+                    agent_id=agent_id
+                )
+                
+                if not admission.admit_full:
+                    # Use truncated result
+                    exec_res = admission.admitted_content
+                    
+                    # Store deferred items in KB with tokens
+                    if admission.deferred_content:
+                        kb = shared.get('refs', {}).get('run', {}).get('runtime', {}).get("knowledge_base")
+                        if kb:
+                            for item in admission.deferred_content:
+                                item.setdefault("metadata", {})
+                                item["metadata"]["deferred"] = True
+                                item["metadata"]["deferred_reason"] = "context_budget_admission_control"
+                                item["metadata"]["source_tool_name"] = self._tool_info["name"]
+                                item["metadata"]["source_agent_id"] = agent_id
+                                await kb.add_item(item)
+                    
+                    logger.info("tool_result_truncated_for_admission", extra={
+                        "tool_name": self._tool_info['name'],
+                        "original_tokens": admission.original_tokens,
+                        "admitted_tokens": admission.admitted_tokens,
+                        "deferred_tokens": admission.deferred_tokens,
+                        "deferred_kb_count": len(admission.deferred_kb_tokens)
+                    })
+            except ImportError as e:
+                logger.debug("pre_admission_check_skipped_import", extra={"error": str(e)})
+            except Exception as e:
+                logger.warning("pre_admission_check_failed", extra={"error": str(e)})
+        # ===============================================================
+
+        # --- START: Knowledge base handling logic ---
         knowledge_items_to_add = exec_res.get("_knowledge_items_to_add", [])
         if knowledge_items_to_add and not is_error:
             kb = shared.get('refs', {}).get('run', {}).get('runtime', {}).get("knowledge_base")

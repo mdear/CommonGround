@@ -26,6 +26,117 @@ from ...llm.config_resolver import LLMConfigResolver
 
 logger = logging.getLogger(__name__)
 
+# Constants for dispatch health monitoring
+DISPATCH_TIMEOUT_SECONDS = 600  # 10 minutes - if a dispatch is RUNNING longer, it may be stuck
+
+
+def detect_stuck_dispatches(team_state: Dict, timeout_seconds: int = DISPATCH_TIMEOUT_SECONDS) -> List[Dict]:
+    """
+    Detects dispatches that are stuck in RUNNING or LAUNCHING state for longer than the timeout.
+    
+    This helps identify silent failures where Associate subflows crashed without proper cleanup.
+    
+    Args:
+        team_state: The shared team_state dictionary.
+        timeout_seconds: How long a dispatch can be RUNNING before being considered stuck.
+        
+    Returns:
+        List of stuck dispatch entries.
+    """
+    dispatch_history = team_state.get("dispatch_history", [])
+    if not dispatch_history:
+        return []
+    
+    stuck = []
+    now = datetime.now(timezone.utc)
+    
+    for entry in dispatch_history:
+        status = entry.get("status", "").upper()
+        if status in ["RUNNING", "LAUNCHING"]:
+            # Check start time
+            start_time_str = entry.get("start_timestamp") or entry.get("_dispatch_started_at")
+            if start_time_str:
+                try:
+                    start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+                    elapsed = (now - start_time).total_seconds()
+                    if elapsed > timeout_seconds:
+                        stuck.append(entry)
+                        logger.warning("stuck_dispatch_detected", extra={
+                            "dispatch_id": entry.get("dispatch_id"),
+                            "module_id": entry.get("module_id"),
+                            "status": status,
+                            "elapsed_seconds": elapsed,
+                            "start_timestamp": start_time_str,
+                            "_subcontext_created": entry.get("_subcontext_created", "unknown"),
+                            "_associate_flow_started": entry.get("_associate_flow_started", "unknown"),
+                            "_associate_flow_completed": entry.get("_associate_flow_completed", "unknown"),
+                        })
+                except (ValueError, TypeError) as e:
+                    logger.debug("stuck_dispatch_time_parse_error", extra={
+                        "dispatch_id": entry.get("dispatch_id"),
+                        "error": str(e)
+                    })
+    
+    return stuck
+
+
+def get_dispatch_health_report(team_state: Dict) -> Dict[str, Any]:
+    """
+    Generates a health report for all dispatches in team_state.
+    
+    Returns:
+        Dict with health metrics and anomalies detected.
+    """
+    dispatch_history = team_state.get("dispatch_history", [])
+    
+    report = {
+        "total_dispatches": len(dispatch_history),
+        "by_status": {},
+        "anomalies": [],
+        "lifecycle_incomplete": [],
+    }
+    
+    for entry in dispatch_history:
+        status = entry.get("status", "UNKNOWN")
+        report["by_status"][status] = report["by_status"].get(status, 0) + 1
+        
+        # Check for lifecycle anomalies (instrumentation fields)
+        subcontext_created = entry.get("_subcontext_created", None)
+        flow_started = entry.get("_associate_flow_started", None)
+        flow_completed = entry.get("_associate_flow_completed", None)
+        
+        # Detect incomplete lifecycles
+        if subcontext_created is not None:  # Has instrumentation
+            issues = []
+            if subcontext_created and not flow_started:
+                issues.append("subcontext_created_but_flow_not_started")
+            if flow_started and not flow_completed:
+                issues.append("flow_started_but_not_completed")
+            if entry.get("_critical_error"):
+                issues.append(f"critical_error: {entry.get('_critical_error_type', 'unknown')}")
+            if entry.get("_flow_error"):
+                issues.append(f"flow_error: {entry.get('_flow_error_type', 'unknown')}")
+            
+            if issues:
+                report["lifecycle_incomplete"].append({
+                    "dispatch_id": entry.get("dispatch_id"),
+                    "module_id": entry.get("module_id"),
+                    "status": status,
+                    "issues": issues,
+                })
+    
+    # Detect stuck dispatches
+    stuck = detect_stuck_dispatches(team_state)
+    if stuck:
+        report["anomalies"].append({
+            "type": "stuck_dispatches",
+            "count": len(stuck),
+            "dispatch_ids": [s.get("dispatch_id") for s in stuck]
+        })
+    
+    return report
+
+
 DESCRIPTION = """
 Called by the Principal to validate and assign a Work Module to an Associate Agent for execution.
   - assignments: List of assignments to be made. Each assignment targets **one** Work Module.
@@ -361,7 +472,12 @@ class DispatcherNode(AsyncParallelBatchNode):
         history_entry = {
             "dispatch_id": executing_associate_id, "dispatch_tool_call_id_ref": assignment_package["dispatch_tool_call_id_ref"],
             "module_id": module_id, "profile_logical_name": profile_logical_name, "start_timestamp": None,
-            "end_timestamp": None, "status": "LAUNCHING", "final_summary": None, "error_details": None
+            "end_timestamp": None, "status": "LAUNCHING", "final_summary": None, "error_details": None,
+            # Instrumentation: Track dispatch lifecycle for debugging silent failures
+            "_dispatch_started_at": datetime.now(timezone.utc).isoformat(),
+            "_subcontext_created": False,
+            "_associate_flow_started": False,
+            "_associate_flow_completed": False,
         }
         team_state_global.setdefault("dispatch_history", []).append(history_entry)
         logger.info("dispatcher_history_entry_added", extra={"executing_associate_id": executing_associate_id, "status": "LAUNCHING"})
@@ -459,6 +575,11 @@ class DispatcherNode(AsyncParallelBatchNode):
 
         logger.info("dispatcher_associate_starting", extra={"executing_associate_id": executing_associate_id})
 
+        # Update history entry to track subcontext creation
+        if history_entry_to_update := next((h for h in team_state_global.get("dispatch_history", []) if h.get("dispatch_id") == executing_associate_id), None):
+            history_entry_to_update["_subcontext_created"] = True
+            history_entry_to_update["_subcontext_created_at"] = datetime.now(timezone.utc).isoformat()
+
         completed_associate_context = None
         associate_exec_status = "error"
         last_turn_id = None
@@ -467,6 +588,12 @@ class DispatcherNode(AsyncParallelBatchNode):
             if run_context_global:
                 run_context_global['sub_context_refs']["_ongoing_associate_tasks"][executing_associate_id] = associate_sub_context
                 logger.info("dispatcher_associate_task_registered", extra={"executing_associate_id": executing_associate_id})
+            
+            # Update history entry to track flow start
+            if history_entry_to_update := next((h for h in team_state_global.get("dispatch_history", []) if h.get("dispatch_id") == executing_associate_id), None):
+                history_entry_to_update["_associate_flow_started"] = True
+                history_entry_to_update["_associate_flow_started_at"] = datetime.now(timezone.utc).isoformat()
+            
             from ...flow import run_associate_async
             completed_associate_context = await run_associate_async(associate_sub_context)
 
@@ -476,7 +603,21 @@ class DispatcherNode(AsyncParallelBatchNode):
             if not final_associate_state.get("error_message"):
                 associate_exec_status = "success"
         except Exception as e:
-            logger.error("dispatcher_associate_critical_error", extra={"executing_associate_id": executing_associate_id, "error": str(e)}, exc_info=True)
+            logger.error("dispatcher_associate_critical_error", extra={
+                "executing_associate_id": executing_associate_id, 
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "module_id": module_id,
+                "profile": profile_logical_name,
+            }, exc_info=True)
+            
+            # Update history entry to track the failure point
+            if history_entry_to_update := next((h for h in team_state_global.get("dispatch_history", []) if h.get("dispatch_id") == executing_associate_id), None):
+                history_entry_to_update["_critical_error"] = True
+                history_entry_to_update["_critical_error_at"] = datetime.now(timezone.utc).isoformat()
+                history_entry_to_update["_critical_error_type"] = type(e).__name__
+                history_entry_to_update["_critical_error_message"] = str(e)[:500]  # Truncate for storage
+            
             if completed_associate_context is None: completed_associate_context = {}
             final_associate_state = completed_associate_context.setdefault("state", {})
             final_associate_state["error_message"] = f"Dispatcher critical error: {str(e)}"
@@ -485,6 +626,12 @@ class DispatcherNode(AsyncParallelBatchNode):
         finally:
             end_time_iso = datetime.now(timezone.utc).isoformat()
             final_outcome = "completed_success" if associate_exec_status == "success" else "completed_error"
+            
+            # Update history entry to track flow completion
+            if history_entry_to_update := next((h for h in team_state_global.get("dispatch_history", []) if h.get("dispatch_id") == executing_associate_id), None):
+                history_entry_to_update["_associate_flow_completed"] = True
+                history_entry_to_update["_associate_flow_completed_at"] = end_time_iso
+                history_entry_to_update["_final_outcome"] = final_outcome
 
             final_associate_state = completed_associate_context.get("state", {}) if completed_associate_context else {}
             deliverables_from_associate = final_associate_state.get("deliverables", {})
@@ -703,3 +850,87 @@ class DispatcherNode(AsyncParallelBatchNode):
             else:
                 processed_exec_res_list.append(res_or_exc)
         return processed_exec_res_list
+
+
+def detect_dispatch_anomalies(shared_state, stale_threshold_minutes: int = 60) -> List[Dict[str, Any]]:
+    """
+    Detects anomalies in dispatch history that may indicate silent failures.
+    
+    This function helps identify dispatches that:
+    1. Are stuck in RUNNING state for too long (stale dispatches)
+    2. Have RUNNING status but the corresponding work module has no sub_context
+    
+    Args:
+        shared_state: The shared state object containing team_state
+        stale_threshold_minutes: Number of minutes after which a RUNNING dispatch is considered stale
+        
+    Returns:
+        List of anomaly dicts with details about each detected anomaly
+    """
+    anomalies = []
+    
+    # Handle both dict-style and object-style access
+    if hasattr(shared_state, 'team_state'):
+        team_state = shared_state.team_state
+    elif isinstance(shared_state, dict):
+        team_state = shared_state.get('team_state', {})
+    else:
+        team_state = {}
+        
+    if not team_state:
+        return anomalies
+    
+    dispatch_history = team_state.get("dispatch_history", [])
+    work_modules = team_state.get("work_modules", {})
+    now = datetime.now(timezone.utc)
+    stale_threshold_seconds = stale_threshold_minutes * 60
+    
+    for dispatch in dispatch_history:
+        dispatch_id = dispatch.get("dispatch_id", "unknown")
+        module_id = dispatch.get("module_id", "unknown")
+        status = dispatch.get("status", "").upper()
+        start_timestamp_str = dispatch.get("start_timestamp")
+        end_timestamp = dispatch.get("end_timestamp")
+        
+        # Check for stale RUNNING dispatches
+        if status == "RUNNING" and not end_timestamp:
+            if start_timestamp_str:
+                try:
+                    start_time = datetime.fromisoformat(start_timestamp_str.replace("Z", "+00:00"))
+                    elapsed_seconds = (now - start_time).total_seconds()
+                    
+                    if elapsed_seconds > stale_threshold_seconds:
+                        # Check if work module has a sub_context
+                        work_module = work_modules.get(module_id, {})
+                        has_sub_context = work_module.get("sub_context_id") is not None
+                        
+                        anomaly = {
+                            "dispatch_id": dispatch_id,
+                            "module_id": module_id,
+                            "anomaly_type": "stale_running",
+                            "status": status,
+                            "elapsed_minutes": round(elapsed_seconds / 60, 1),
+                            "start_timestamp": start_timestamp_str,
+                            "has_sub_context": has_sub_context,
+                            "details": f"Dispatch has been RUNNING for {round(elapsed_seconds / 60, 1)} minutes without completion. "
+                                      f"Work module {'has' if has_sub_context else 'has no'} sub_context."
+                        }
+                        
+                        if not has_sub_context:
+                            anomaly["details"] += " No sub_context was created - dispatch may have failed silently."
+                        
+                        anomalies.append(anomaly)
+                        logger.warning("dispatch_anomaly_detected", extra={
+                            "dispatch_id": dispatch_id,
+                            "module_id": module_id,
+                            "anomaly_type": "stale_running",
+                            "elapsed_minutes": round(elapsed_seconds / 60, 1),
+                            "has_sub_context": has_sub_context
+                        })
+                except (ValueError, TypeError) as e:
+                    logger.debug("dispatch_anomaly_time_parse_error", extra={
+                        "dispatch_id": dispatch_id,
+                        "error": str(e)
+                    })
+    
+    return anomalies

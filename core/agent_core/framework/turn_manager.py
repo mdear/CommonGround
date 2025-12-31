@@ -3,13 +3,17 @@ import logging
 import uuid
 import json
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 # Import Turn model definitions
 from ..models.turn import Turn, LLMInteraction, ToolInteraction
 
 # Get logger
 logger = logging.getLogger(__name__)
+
+# Constants for orphan detection
+ORPHAN_TOOL_INTERACTION_TIMEOUT_SECONDS = 300  # 5 minutes
+
 
 class TurnManager:
     """
@@ -379,3 +383,79 @@ class TurnManager:
         logger.info("aggregation_turn_created_by_manager", extra={"aggregation_turn_id": aggregation_turn_id, "dispatch_tool_call_id": dispatch_tool_call_id})
         
         return aggregation_turn_id
+
+    def detect_orphaned_tool_interactions(self, team_state: Dict, timeout_seconds: int = ORPHAN_TOOL_INTERACTION_TIMEOUT_SECONDS) -> List[Tuple[str, str, Dict]]:
+        """
+        Detects tool interactions that are stuck in "running" state for longer than the timeout.
+        
+        This helps identify silent failures where tools crashed before sending results back to the inbox.
+        
+        Args:
+            team_state: The shared team_state dictionary.
+            timeout_seconds: How long a tool can be in "running" state before being considered orphaned.
+            
+        Returns:
+            List of tuples: (turn_id, tool_call_id, tool_interaction_dict)
+        """
+        if "turns" not in team_state:
+            return []
+        
+        orphaned = []
+        now = datetime.now(timezone.utc)
+        
+        for turn in team_state["turns"]:
+            for ti in turn.get("tool_interactions", []):
+                if ti.get("status") == "running":
+                    start_time_str = ti.get("start_time")
+                    if start_time_str:
+                        try:
+                            start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+                            elapsed = (now - start_time).total_seconds()
+                            if elapsed > timeout_seconds:
+                                orphaned.append((turn.get("turn_id"), ti.get("tool_call_id"), ti))
+                                logger.warning("orphaned_tool_interaction_detected", extra={
+                                    "turn_id": turn.get("turn_id"),
+                                    "tool_call_id": ti.get("tool_call_id"),
+                                    "tool_name": ti.get("tool_name"),
+                                    "elapsed_seconds": elapsed,
+                                    "start_time": start_time_str
+                                })
+                        except (ValueError, TypeError) as e:
+                            logger.debug("orphan_detection_time_parse_error", extra={
+                                "tool_call_id": ti.get("tool_call_id"),
+                                "error": str(e)
+                            })
+        
+        return orphaned
+    
+    def finalize_orphaned_tool_interactions(self, team_state: Dict, timeout_seconds: int = ORPHAN_TOOL_INTERACTION_TIMEOUT_SECONDS) -> int:
+        """
+        Detects and finalizes orphaned tool interactions by marking them as errors.
+        
+        This is a recovery mechanism to prevent silent failures from leaving the system in an inconsistent state.
+        
+        Args:
+            team_state: The shared team_state dictionary.
+            timeout_seconds: How long a tool can be in "running" state before being considered orphaned.
+            
+        Returns:
+            Number of orphaned tool interactions that were finalized.
+        """
+        orphaned = self.detect_orphaned_tool_interactions(team_state, timeout_seconds)
+        finalized_count = 0
+        
+        for turn_id, tool_call_id, ti in orphaned:
+            ti["status"] = "error"
+            ti["end_time"] = datetime.now(timezone.utc).isoformat()
+            ti["error_details"] = f"Tool interaction timed out after {timeout_seconds}s - possible silent failure"
+            ti["result_payload"] = {"error": "orphaned_tool_interaction", "timeout_seconds": timeout_seconds}
+            finalized_count += 1
+            
+            logger.warning("orphaned_tool_interaction_finalized", extra={
+                "turn_id": turn_id,
+                "tool_call_id": tool_call_id,
+                "tool_name": ti.get("tool_name"),
+                "timeout_seconds": timeout_seconds
+            })
+        
+        return finalized_count

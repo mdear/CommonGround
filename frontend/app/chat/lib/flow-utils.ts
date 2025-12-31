@@ -4,12 +4,12 @@ import { FlowNodeData } from '@/app/stores/sessionStore';
 
 // Define fallback dimensions for the initial render pass.
 // These are used before the actual node sizes are measured.
-// Updated to fixed height levels.
+// Updated to realistic heights that account for header + content + tools + footer.
 export const NODE_FALLBACK_DIMENSIONS = {
-  turn: { width: 340, height: 220 }, // Base height: header + content(S) + tools + footer
-  principal: { width: 340, height: 180 }, // Principal node is slightly smaller
-  agent: { width: 320, height: 160 }, // Agent node
-  default: { width: 280, height: 100 },
+  turn: { width: 340, height: 320 }, // Base height: header(40) + content(L=160) + tools(80) + footer(20) + padding
+  principal: { width: 340, height: 280 }, // Principal node
+  agent: { width: 320, height: 260 }, // Agent node
+  default: { width: 280, height: 150 },
   gather: { width: 340, height: 35 }, // Gather node aligned with other cards' width
 };
 
@@ -211,8 +211,8 @@ export const getLayoutedElements = (
   });
 
   // Layout configuration
-  const LEVEL_SPACING = 50; // Gap between levels (in pixels)
-  const MIN_NODE_HEIGHT = 60; // Minimum node height for consistent spacing
+  const LEVEL_SPACING = 80; // Gap between levels (in pixels) - increased for better separation
+  const MIN_NODE_HEIGHT = 200; // Minimum node height for consistent spacing - accounts for content boxes
   const HORIZONTAL_SPACING = 40; // Spacing between node edges (not centers)
   const VIEWPORT_CENTER_X = 500; // Center X coordinate for viewport
   

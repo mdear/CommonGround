@@ -486,87 +486,51 @@ export class SessionManager {
 
   /**
    * Get or create a session, checking for reconnection possibilities.
+   * 
+   * IMPORTANT: We always create a NEW session_id for WebSocket connection,
+   * because the backend removes session_ids from pending_websocket_sessions
+   * after the first WebSocket connection. But we preserve runId/lastEventId
+   * from the old session for reconnection purposes.
    */
   async getOrCreateSession(projectId: string = 'default'): Promise<{
     tokens: SessionTokens;
     isReconnect: boolean;
     reconnectInfo?: { runId: string; lastEventId?: number };
   }> {
-    // Check for existing session
+    // Check for existing session to get reconnection info
     const existingSession = this.loadSession();
+    let reconnectInfo: { runId: string; lastEventId?: number } | undefined;
 
-    if (existingSession) {
-      // Check if JWT is still valid
-      const isExpired = Date.now() >= existingSession.expiresAt - 5000;
-
-      if (isExpired) {
-        // Try to refresh
-        const refreshed = await this.performSilentRefresh();
-        if (!refreshed) {
-          // Create new session
-          const tokens = await this.createSession(projectId);
-          return { tokens, isReconnect: false };
-        }
-
-        // Reload refreshed session
-        const refreshedSession = this.loadSession()!;
-        const tokens: SessionTokens = {
-          session_id: refreshedSession.sessionId,
-          jwt_token: refreshedSession.jwtToken,
-          refresh_token: refreshedSession.refreshToken,
-          expires_in: Math.floor((refreshedSession.expiresAt - Date.now()) / 1000),
-        };
-
-        // Check for reconnection
-        if (refreshedSession.runId) {
-          const { canReconnect } = await this.checkForReconnection();
-          if (canReconnect) {
-            return {
-              tokens,
-              isReconnect: true,
-              reconnectInfo: {
-                runId: refreshedSession.runId,
-                lastEventId: refreshedSession.lastEventId,
-              },
-            };
-          }
-        }
-
-        return { tokens, isReconnect: false };
-      }
-
-      // JWT is still valid
-      const tokens: SessionTokens = {
-        session_id: existingSession.sessionId,
-        jwt_token: existingSession.jwtToken,
-        refresh_token: existingSession.refreshToken,
-        expires_in: Math.floor((existingSession.expiresAt - Date.now()) / 1000),
-      };
-
-      // Schedule refresh if not already scheduled
-      this.scheduleAutoRefresh(tokens);
-
-      // Check for reconnection
-      if (existingSession.runId) {
+    if (existingSession?.runId) {
+      // Check if we can reconnect to the existing run
+      try {
         const { canReconnect } = await this.checkForReconnection();
         if (canReconnect) {
-          return {
-            tokens,
-            isReconnect: true,
-            reconnectInfo: {
-              runId: existingSession.runId,
-              lastEventId: existingSession.lastEventId,
-            },
+          reconnectInfo = {
+            runId: existingSession.runId,
+            lastEventId: existingSession.lastEventId,
           };
+          console.log('[SessionManager] Found reconnectable run:', reconnectInfo);
         }
+      } catch (e) {
+        console.warn('[SessionManager] Failed to check reconnection:', e);
       }
-
-      return { tokens, isReconnect: false };
     }
 
-    // No existing session - create new
+    // Always create a new session for WebSocket connection
+    // The backend requires a fresh session_id in pending_websocket_sessions
     const tokens = await this.createSession(projectId);
-    return { tokens, isReconnect: false };
+    
+    // Preserve run info in the new session for reconnection
+    if (reconnectInfo) {
+      this.updateRunInfo(reconnectInfo.runId, reconnectInfo.lastEventId);
+    }
+
+    return {
+      tokens,
+      isReconnect: !!reconnectInfo,
+      reconnectInfo,
+    };
   }
 }
 
