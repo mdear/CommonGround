@@ -61,7 +61,7 @@ export const Workspace = observer((props: WorkspaceProps) => {
   // and its logic is now centralized in `sessionStore.ts` to prevent race conditions.
 
   return (
-    <div className="flex-1 flex flex-col bg-[#FAFAFA] h-[calc(100vh-46px)] min-w-0">
+    <div className="flex-1 flex flex-col bg-[#FAFAFA] h-[calc(100vh-46px)] min-w-0 overflow-hidden">
       <div className="flex items-center justify-between p-3">
         <div className="flex items-center gap-2">
           <Button

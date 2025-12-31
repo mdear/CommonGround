@@ -6,11 +6,11 @@ import { FlowNodeData } from '@/app/stores/sessionStore';
 // These are used before the actual node sizes are measured.
 // Updated to realistic heights that account for header + content + tools + footer.
 export const NODE_FALLBACK_DIMENSIONS = {
-  turn: { width: 340, height: 320 }, // Base height: header(40) + content(L=160) + tools(80) + footer(20) + padding
-  principal: { width: 340, height: 280 }, // Principal node
-  agent: { width: 320, height: 260 }, // Agent node
-  default: { width: 280, height: 150 },
-  gather: { width: 340, height: 35 }, // Gather node aligned with other cards' width
+  turn: { width: 380, height: 320 }, // Base: header(40) + content(L=160) + tools(80) + footer(20) + padding. Width increased for long text.
+  principal: { width: 380, height: 280 }, // Principal node - matches turn width
+  agent: { width: 360, height: 260 }, // Agent node
+  default: { width: 320, height: 150 },
+  gather: { width: 380, height: 35 }, // Gather node aligned with other cards' width
 };
 
 // 6 fixed heights for the content box (including padding)
@@ -63,7 +63,11 @@ function getNodeSize(
   const nodeId = node.data.id;
   const measuredSize = nodeSizes.get(nodeId);
   if (measuredSize && measuredSize.width > 0 && measuredSize.height > 0) {
-    return measuredSize;
+    // Ensure minimum dimensions even for measured sizes
+    return {
+      width: Math.max(measuredSize.width, 340),
+      height: Math.max(measuredSize.height, 150)
+    };
   }
   const nodeType = (node.data.data as FlowNodeData)?.nodeType || 'turn';
   return (
@@ -213,7 +217,6 @@ export const getLayoutedElements = (
   // Layout configuration
   const LEVEL_SPACING = 80; // Gap between levels (in pixels) - increased for better separation
   const MIN_NODE_HEIGHT = 200; // Minimum node height for consistent spacing - accounts for content boxes
-  const HORIZONTAL_SPACING = 40; // Spacing between node edges (not centers)
   const VIEWPORT_CENTER_X = 500; // Center X coordinate for viewport
   
   const levelYs = new Map<number, number>();
@@ -261,84 +264,71 @@ export const getLayoutedElements = (
     console.log(`📏 Layer ${depth} max content level: ${maxContentLevel}`);
   });
   
-  // First pass: Calculate initial positions for nodes
-  const agentColumnPositions = new Map<string, number>(); // agent_id -> x position
+  // First, discover all unique agents and determine the maximum number of concurrent swim lanes
+  const allAgentIds = new Set<string>();
+  let maxConcurrentAgents = 1;
+  
+  nodesByDepth.forEach((nodesOnLevel) => {
+    const agentsOnLevel = new Set<string>();
+    nodesOnLevel.forEach(node => {
+      const agentId = node.data.data?.agent_id;
+      if (agentId) {
+        allAgentIds.add(agentId);
+        agentsOnLevel.add(agentId);
+      }
+    });
+    maxConcurrentAgents = Math.max(maxConcurrentAgents, agentsOnLevel.size);
+  });
+  
+  console.log(`🏊 Swim lanes: ${allAgentIds.size} unique agents, max ${maxConcurrentAgents} concurrent`);
+  
+  // Establish fixed swim lane positions based on maximum concurrent agents
+  // This ensures columns don't shift when new agents appear
+  const agentColumnPositions = new Map<string, number>(); // agent_id -> x position (center of column)
+  const SWIM_LANE_WIDTH = 420; // Width of each swim lane (node width + padding)
+  
+  // Position swim lanes based on first occurrence order, but with fixed widths
+  const agentOrder: string[] = []; // Track order agents first appear
   
   nodesByDepth.forEach((nodesOnLevel, depth) => {
-    const levelY = levelYs.get(depth) || 0;
-    const levelNodeCount = nodesOnLevel.length;
-    
-    if (levelNodeCount === 0) return;
-    
-    // New layout calculation: total width = sum of all node widths + spacing between nodes
-    if (levelNodeCount === 1) {
-      // A single node is centered directly
-      const node = nodesOnLevel[0];
-      const { width } = getNodeSize(node, nodeSizes);
-      const x = VIEWPORT_CENTER_X - (width / 2);
-      const y = levelY;
-      
-      node.data.position = { x, y };
-      
-      // Record agent column position
+    nodesOnLevel.forEach(node => {
       const agentId = node.data.data?.agent_id;
-      if (agentId && !agentColumnPositions.has(agentId)) {
-        agentColumnPositions.set(agentId, x);
-        console.log(`🏛️ Agent ${agentId} column established at x=${x} (depth ${depth})`);
+      if (agentId && !agentOrder.includes(agentId)) {
+        agentOrder.push(agentId);
       }
-      
-      console.log(`📍 Positioned single ${node.data.data?.nodeType} node '${node.data.data?.label}' at level ${depth}, position (${x}, ${y}), width: ${width}`);
-    } else {
-      // Multiple nodes: calculate total width = sum of all node widths + spacing
-      const nodeWidths = nodesOnLevel.map(node => getNodeSize(node, nodeSizes).width);
-      const totalNodesWidth = nodeWidths.reduce((sum, width) => sum + width, 0);
-      const totalSpacingWidth = (levelNodeCount - 1) * HORIZONTAL_SPACING;
-      const totalRowWidth = totalNodesWidth + totalSpacingWidth;
-      
-      // Calculate the starting X position to center the entire row
-      const startX = VIEWPORT_CENTER_X - (totalRowWidth / 2);
-      
-      // Position nodes one by one
-      let currentX = startX;
-      nodesOnLevel.forEach((node) => {
-        const { width } = getNodeSize(node, nodeSizes);
-        const x = currentX;
-        const y = levelY;
-        
-        node.data.position = { x, y };
-        
-        // Record agent column position (use the shallowest depth for each agent)
-        const agentId = node.data.data?.agent_id;
-        if (agentId && !agentColumnPositions.has(agentId)) {
-          agentColumnPositions.set(agentId, x);
-          console.log(`🏛️ Agent ${agentId} column established at x=${x} (depth ${depth})`);
-        }
-        
-        console.log(`📍 Positioned ${node.data.data?.nodeType} node '${node.data.data?.label}' at level ${depth}, position (${x}, ${y}), width: ${width}, totalRowWidth: ${totalRowWidth}`);
-        
-        // Move to the starting position for the next node
-        currentX += width + HORIZONTAL_SPACING;
-      });
-    }
+    });
+  });
+  
+  // Calculate swim lane center positions
+  const totalSwimLaneWidth = agentOrder.length * SWIM_LANE_WIDTH;
+  const swimLaneStartX = VIEWPORT_CENTER_X - (totalSwimLaneWidth / 2) + (SWIM_LANE_WIDTH / 2);
+  
+  agentOrder.forEach((agentId, index) => {
+    const laneCenter = swimLaneStartX + (index * SWIM_LANE_WIDTH);
+    agentColumnPositions.set(agentId, laneCenter);
+    console.log(`🏊 Swim lane ${index}: agent ${agentId} at x=${laneCenter}`);
   });
 
-  // Second pass: Align nodes with the same agent_id to their established column positions
-  nodesByDepth.forEach((nodesOnLevel) => {
+  // Now position nodes using their swim lane positions
+  nodesByDepth.forEach((nodesOnLevel, depth) => {
+    const levelY = levelYs.get(depth) || 0;
+    
     nodesOnLevel.forEach((node) => {
+      const { width } = getNodeSize(node, nodeSizes);
       const agentId = node.data.data?.agent_id;
+      
+      let x: number;
       if (agentId && agentColumnPositions.has(agentId)) {
-        const establishedX = agentColumnPositions.get(agentId)!;
-        const currentX = node.data.position.x;
-        
-        // Only update if the position is different (i.e., this is a deeper node)
-        if (currentX !== establishedX) {
-          node.data.position = { 
-            x: establishedX, 
-            y: node.data.position.y 
-          };
-          console.log(`🔗 Aligned agent ${agentId} node '${node.data.data?.label}' to column x=${establishedX} (was ${currentX})`);
-        }
+        // Use the swim lane center, then offset to position left edge
+        const laneCenter = agentColumnPositions.get(agentId)!;
+        x = laneCenter - (width / 2);
+      } else {
+        // No agent ID - center the node
+        x = VIEWPORT_CENTER_X - (width / 2);
       }
+      
+      node.data.position = { x, y: levelY };
+      console.log(`📍 Positioned ${node.data.data?.nodeType} node '${node.data.data?.label}' at (${x}, ${levelY}), agent: ${agentId || 'none'}`);
     });
   });
 

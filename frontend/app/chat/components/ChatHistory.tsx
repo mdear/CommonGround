@@ -10,7 +10,7 @@ interface ChatHistoryProps {
 
 export const ChatHistory = observer(({ messages, messagesEndRef }: ChatHistoryProps) => {
   return (
-    <div className="flex-1 overflow-y-auto px-3 py-4 space-y-6">
+    <div className="flex-1 overflow-y-auto overscroll-contain px-3 py-4 space-y-6">
       {messages.map((turn) => (
         <TurnBubble
           key={turn.turn_id}

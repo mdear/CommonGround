@@ -32,7 +32,7 @@ interface ChatLayoutProps {
 
 export const ChatLayout = observer(function ChatLayout(props: ChatLayoutProps) {
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex flex-col h-screen overflow-hidden">
       <div className="flex-shrink-0 h-12 border-b bg-white flex items-center justify-between px-3">
         <div className="flex items-center gap-3">
           <SidebarTrigger />
@@ -45,13 +45,13 @@ export const ChatLayout = observer(function ChatLayout(props: ChatLayoutProps) {
         </div>
       </div>
 
-      <div className="flex flex-1">
+      <div className="flex flex-1 overflow-hidden">
         <ResizablePanelGroup direction="horizontal">
           <ResizablePanel 
             defaultSize={30} 
             minSize={25} 
             maxSize={40}
-            className="flex flex-col h-[calc(100vh-46px)] border-r"
+            className="flex flex-col h-[calc(100vh-46px)] border-r overflow-hidden"
           >
             <ChatHistory messages={props.messages} messagesEndRef={props.messagesEndRef} />
             <ChatInput
@@ -67,7 +67,7 @@ export const ChatLayout = observer(function ChatLayout(props: ChatLayoutProps) {
 
           <ResizableHandle withHandle />
 
-          <ResizablePanel defaultSize={70}>
+          <ResizablePanel defaultSize={70} className="overflow-hidden">
             <Workspace
               runId={props.runId}
               selectedNode={props.selectedNode}

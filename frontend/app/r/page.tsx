@@ -108,7 +108,8 @@ const RunPageLoader = observer(() => {
   }, [runId, store]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // Use block: 'nearest' to scroll within the chat container only, not the whole page
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [chatHistoryTurnsForRun.length, lastMessageContent]);
 
   const sendMessage = useCallback(async () => {

@@ -101,7 +101,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${montserrat.variable}`}>
+      <body className={`${montserrat.variable} h-full overflow-hidden`}>
         <Suspense
           fallback={
             <div className="min-h-screen flex items-center justify-center bg-background">
@@ -111,9 +111,9 @@ export default function RootLayout({
         >
           <SessionProvider>
             <AppProvider>
-              <SidebarProvider>
+              <SidebarProvider className="h-screen !min-h-0 overflow-hidden">
                 <AppSidebar />
-                <main className="flex-1 min-w-0">
+                <main className="flex-1 min-w-0 h-screen overflow-hidden">
                   {children}
                 </main>
               </SidebarProvider>

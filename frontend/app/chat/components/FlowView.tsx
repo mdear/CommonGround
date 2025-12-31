@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useLayoutEffect } from 'react';
+import React, { useMemo, useRef, useLayoutEffect, useCallback } from 'react';
 import { Badge } from '@/components/ui/badge';
 import ReactFlow, {
   Background,
@@ -11,6 +11,8 @@ import ReactFlow, {
   NodeProps,
   EdgeProps,
   BaseEdge,
+  useReactFlow,
+  ReactFlowProvider,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useFlowView } from '../hooks/useFlowView';
@@ -314,7 +316,8 @@ interface FlowViewProps {
   onNodeClick: NodeMouseHandler;
 }
 
-export const FlowView = observer(({ onNodeClick }: FlowViewProps) => {
+// Inner component that can use useReactFlow hook
+const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
   const { nodes, edges, onNodeSizesChange } = useFlowView(sessionStore.flowStructure);
   const proOptions = { hideAttribution: true };
   
@@ -345,6 +348,58 @@ export const FlowView = observer(({ onNodeClick }: FlowViewProps) => {
     []
   );
 
+  // Calculate the bounding box of all nodes
+  const nodeBounds = useMemo(() => {
+    if (nodes.length === 0) {
+      return { minX: 0, minY: 0, maxX: 1000, maxY: 800, width: 1000, height: 800 };
+    }
+    
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    nodes.forEach(node => {
+      const x = node.position.x;
+      const y = node.position.y;
+      const width = node.width || 380;
+      const height = node.height || 200;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + width);
+      maxY = Math.max(maxY, y + height);
+    });
+    
+    return { 
+      minX, minY, maxX, maxY, 
+      width: maxX - minX, 
+      height: maxY - minY 
+    };
+  }, [nodes]);
+
+  // Calculate translate extent to constrain panning within reasonable bounds around nodes
+  // This prevents users from panning into infinite empty space, which causes minimap zoom-out
+  const translateExtent = useMemo((): [[number, number], [number, number]] => {
+    const padding = 500;
+    return [
+      [nodeBounds.minX - padding, nodeBounds.minY - padding],
+      [nodeBounds.maxX + padding, nodeBounds.maxY + padding]
+    ];
+  }, [nodeBounds]);
+
+  // Calculate dynamic minZoom based on content size
+  // This ensures "zoom out all the way" shows all cards
+  const dynamicMinZoom = useMemo(() => {
+    // Assume a typical viewport of ~800x600 for calculation
+    // The actual fitView will handle the real viewport
+    const viewportWidth = 1200;
+    const viewportHeight = 800;
+    const padding = 0.2; // 20% padding around content
+    
+    const scaleX = viewportWidth / (nodeBounds.width * (1 + padding));
+    const scaleY = viewportHeight / (nodeBounds.height * (1 + padding));
+    const fitZoom = Math.min(scaleX, scaleY);
+    
+    // Don't go below 0.05 (5%) or above 0.5 for minZoom
+    return Math.max(0.05, Math.min(0.5, fitZoom * 0.8));
+  }, [nodeBounds]);
+
   const viewError = sessionStore.viewErrors.get('flow_view');
 
   if (viewError) {
@@ -364,6 +419,9 @@ export const FlowView = observer(({ onNodeClick }: FlowViewProps) => {
     );
   }
 
+  // maxZoom of 1.5 allows reading card text comfortably (150% of actual size)
+  const maxZoom = 1.5;
+
   return (
     <ReactFlow
       nodes={nodes}
@@ -373,20 +431,22 @@ export const FlowView = observer(({ onNodeClick }: FlowViewProps) => {
       defaultEdgeOptions={{ type: 'custom' }}
       fitView={shouldFitView}
       fitViewOptions={{ 
-        padding: 0.3,  // increase padding to 30%
-        maxZoom: 1.0,  // limit max zoom to 1:1 to prevent nodes from getting too large
-        minZoom: 0.1   // allow zooming out to 10%
+        padding: 0.3,  // 30% padding around content
+        maxZoom: 1.0,  // fitView won't zoom past 100%
+        minZoom: dynamicMinZoom
       }}
-      defaultViewport={{ x: 0, y: 0, zoom: 0.8 }} // Set default zoom to 80%
-      minZoom={0.1}
-      maxZoom={2.0}
+      defaultViewport={{ x: 0, y: 0, zoom: 0.8 }}
+      minZoom={dynamicMinZoom}  // Dynamic: adapts to show all cards
+      maxZoom={maxZoom}         // Fixed: readable card text at 150%
+      translateExtent={translateExtent}
       className="bg-white rounded-lg border border-[#E4E4E4]"
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable={true}
       panOnDrag={true}
-      zoomOnScroll={true}
-      preventScrolling={false}
+      zoomOnScroll={true}       // Default canvas zoom (~9 clicks min to max)
+      zoomOnDoubleClick={false}
+      preventScrolling={true}
       proOptions={proOptions}
       onNodeClick={onNodeClick}
       nodesFocusable={true}
@@ -395,7 +455,37 @@ export const FlowView = observer(({ onNodeClick }: FlowViewProps) => {
     >
       <Background color="#ffffff" variant={BackgroundVariant.Dots} gap={12} size={1} />
       <Controls showZoom={true} showFitView={true} showInteractive={false} />
-      <MiniMap nodeColor={n => (n.type === 'custom' ? '#fff' : '#eee')} zoomable={true} pannable={true} />
+      <MiniMap 
+        nodeColor={(n) => {
+          // Color nodes based on their status for better visibility
+          const status = n.data?.status;
+          if (status === 'running') return '#3b82f6'; // blue
+          if (status === 'completed_success') return '#22c55e'; // green
+          if (status === 'completed_error') return '#ef4444'; // red
+          return '#94a3b8'; // slate for idle/default
+        }}
+        nodeStrokeColor="#64748b"
+        nodeStrokeWidth={2}
+        nodeBorderRadius={4}
+        maskColor="rgba(0, 0, 0, 0.1)"
+        zoomable={true}
+        zoomStep={1}       // Match canvas: ~9 clicks min to max (default 10 is too fast)
+        pannable={true}
+        style={{ 
+          backgroundColor: '#f8fafc',
+          border: '1px solid #e2e8f0',
+          borderRadius: '4px'
+        }}
+      />
     </ReactFlow>
+  );
+});
+
+// Main export - wraps with ReactFlowProvider so inner components can use useReactFlow
+export const FlowView = observer(({ onNodeClick }: FlowViewProps) => {
+  return (
+    <ReactFlowProvider>
+      <FlowViewInner onNodeClick={onNodeClick} />
+    </ReactFlowProvider>
   );
 });
