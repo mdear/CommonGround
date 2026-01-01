@@ -27,22 +27,22 @@ const CustomEdge = ({ id, sourceX, sourceY, targetX, targetY, style }: EdgeProps
   // Calculate the bend point position: 25px before the target
   const bendOffset = 15;
   let bendY = targetY - bendOffset;
-  
+
   // Ensure the bend point is not too close to the source
   if (Math.abs(bendY - sourceY) < 20) {
     bendY = sourceY + (targetY - sourceY) * 0.7; // If it's too close, use 70% of the position
   }
-  
+
   // Create path: source -> bend point -> target
   const path = `M ${sourceX},${sourceY} L ${sourceX},${bendY} L ${targetX},${bendY} L ${targetX},${targetY}`;
-  
+
   return (
-    <BaseEdge 
-      id={id} 
+    <BaseEdge
+      id={id}
       path={path}
-      style={{ 
-        ...style, 
-        stroke: '#888888', 
+      style={{
+        ...style,
+        stroke: '#888888',
         strokeWidth: 1,
         fill: 'none'
       }}
@@ -97,7 +97,7 @@ const ParamsList = ({ data }: { data: Record<string, unknown> | null | undefined
 // Calculate content box height level based on content length
 const getContentHeightClass = (content: string): { class: string; size: string } => {
   if (!content) return { class: 'h-0', size: 'XS' }; // XS - height is 0 for no content
-  
+
   const length = content.length;
   if (length <= 50) return { class: 'h-6', size: 'S' }; // S - 1 line of text
   if (length <= 200) return { class: 'h-20', size: 'M' }; // M - 5 lines of text
@@ -108,22 +108,22 @@ const getContentHeightClass = (content: string): { class: string; size: string }
 
 const TurnNodeContent = observer(({ data }: { data: FlowNodeData }) => {
   const streamingContent = data.content_stream_id ? sessionStore.streamingContent.get(data.content_stream_id) : '';
-  
+
   // When running, prioritize streaming content. When finished, show only final content.
   const displayContent = data.status === 'running'
     ? (streamingContent || data.final_content || '')
     : (data.final_content || '');
-    
+
   const isRunningButEmpty = data.status === 'running' && !displayContent;
   const hasTools = data.tool_interactions && data.tool_interactions.length > 0;
   const hasContent = isRunningButEmpty || displayContent;
-  
+
   // Dynamically calculate the height level of the current content (including streaming content)
   const currentContentHeight = getContentHeightClass(displayContent);
-  
+
   // Get the layer's preset max content level as the minimum height
   const layerMaxLevel = data.layerMaxContentLevel || 'XS';
-  
+
   // Get height class based on the max level for the layer
   const getHeightClassForLevel = (level: string) => {
     switch (level) {
@@ -136,13 +136,13 @@ const TurnNodeContent = observer(({ data }: { data: FlowNodeData }) => {
       default: return 'h-0';
     }
   };
-  
+
   // Take the maximum of the current content's required height and the layer's minimum height
   const levels = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
   const currentLevelIndex = levels.indexOf(currentContentHeight.size);
   const layerLevelIndex = levels.indexOf(layerMaxLevel);
   const finalLevel = levels[Math.max(currentLevelIndex, layerLevelIndex)];
-  
+
   const unifiedContentHeight = {
     class: getHeightClassForLevel(finalLevel),
     size: finalLevel
@@ -276,12 +276,30 @@ const CustomNode = observer(({ id, data, onSizeChange }: CustomNodeProps) => {
     return (
       <div ref={nodeRef} style={{ width: 340, height: 35 }} className="flex items-center justify-center relative">
         <Handle type="target" position={Position.Top} className="!w-2 !h-2" />
-        
+
         {/* Gather node - borderless "Synthesis" text, aligned with other cards' width */}
         <div className="w-full h-full flex items-center justify-center">
           <span className="text-sm font-medium text-gray-700 select-none">
             Synthesis
           </span>
+        </div>
+        <Handle type="source" position={Position.Bottom} className="!w-2 !h-2" />
+      </div>
+    );
+  }
+
+  if (nodeType === 'epoch_separator') {
+    return (
+      <div ref={nodeRef} style={{ width: 340, height: 40 }} className="flex items-center justify-center relative">
+        <Handle type="target" position={Position.Top} className="!w-2 !h-2" />
+
+        {/* Epoch separator - horizontal line with epoch label */}
+        <div className="w-full h-full flex items-center justify-center gap-3">
+          <div className="flex-1 h-px bg-gradient-to-r from-transparent via-blue-300 to-blue-400"></div>
+          <span className="text-xs font-medium text-blue-500 select-none whitespace-nowrap px-2 py-1 bg-blue-50 rounded-full border border-blue-200">
+            {data.label || 'New Epoch'}
+          </span>
+          <div className="flex-1 h-px bg-gradient-to-l from-transparent via-blue-300 to-blue-400"></div>
         </div>
         <Handle type="source" position={Position.Bottom} className="!w-2 !h-2" />
       </div>
@@ -304,7 +322,7 @@ const CustomNode = observer(({ id, data, onSizeChange }: CustomNodeProps) => {
   return (
     <div ref={nodeRef} style={{ width: 340 }} className={containerClasses}>
       <Handle type="target" position={Position.Top} className="!w-2 !h-2" style={{ left: '50%', transform: 'translateX(-50%)' }} />
-      
+
       {renderContent()}
       <Handle type="source" position={Position.Bottom} className="!w-2 !h-2" style={{ left: '50%', transform: 'translateX(-50%)' }} />
     </div>
@@ -320,10 +338,10 @@ interface FlowViewProps {
 const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
   const { nodes, edges, onNodeSizesChange } = useFlowView(sessionStore.flowStructure);
   const proOptions = { hideAttribution: true };
-  
+
   // Used to track if fitView should be called (only on first data receipt)
   const [shouldFitView, setShouldFitView] = React.useState(false);
-  
+
   // Listen for ViewModel state changes
   React.useEffect(() => {
     if (sessionStore.flowStructure && sessionStore.isWaitingForNewViewModel === false) {
@@ -342,8 +360,8 @@ const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
   );
 
   const edgeTypes = useMemo(
-    () => ({ 
-      custom: CustomEdge 
+    () => ({
+      custom: CustomEdge
     }),
     []
   );
@@ -353,7 +371,7 @@ const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
     if (nodes.length === 0) {
       return { minX: 0, minY: 0, maxX: 1000, maxY: 800, width: 1000, height: 800 };
     }
-    
+
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     nodes.forEach(node => {
       const x = node.position.x;
@@ -365,11 +383,11 @@ const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
       maxX = Math.max(maxX, x + width);
       maxY = Math.max(maxY, y + height);
     });
-    
-    return { 
-      minX, minY, maxX, maxY, 
-      width: maxX - minX, 
-      height: maxY - minY 
+
+    return {
+      minX, minY, maxX, maxY,
+      width: maxX - minX,
+      height: maxY - minY
     };
   }, [nodes]);
 
@@ -391,11 +409,11 @@ const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
     const viewportWidth = 1200;
     const viewportHeight = 800;
     const padding = 0.2; // 20% padding around content
-    
+
     const scaleX = viewportWidth / (nodeBounds.width * (1 + padding));
     const scaleY = viewportHeight / (nodeBounds.height * (1 + padding));
     const fitZoom = Math.min(scaleX, scaleY);
-    
+
     // Don't go below 0.05 (5%) or above 0.5 for minZoom
     return Math.max(0.05, Math.min(0.5, fitZoom * 0.8));
   }, [nodeBounds]);
@@ -430,7 +448,7 @@ const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
       edgeTypes={edgeTypes}
       defaultEdgeOptions={{ type: 'custom' }}
       fitView={shouldFitView}
-      fitViewOptions={{ 
+      fitViewOptions={{
         padding: 0.3,  // 30% padding around content
         maxZoom: 1.0,  // fitView won't zoom past 100%
         minZoom: dynamicMinZoom
@@ -455,7 +473,7 @@ const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
     >
       <Background color="#ffffff" variant={BackgroundVariant.Dots} gap={12} size={1} />
       <Controls showZoom={true} showFitView={true} showInteractive={false} />
-      <MiniMap 
+      <MiniMap
         nodeColor={(n) => {
           // Color nodes based on their status for better visibility
           const status = n.data?.status;
@@ -471,7 +489,7 @@ const FlowViewInner = observer(({ onNodeClick }: FlowViewProps) => {
         zoomable={true}
         zoomStep={1}       // Match canvas: ~9 clicks min to max (default 10 is too fast)
         pannable={true}
-        style={{ 
+        style={{
           backgroundColor: '#f8fafc',
           border: '1px solid #e2e8f0',
           borderRadius: '4px'

@@ -11,13 +11,14 @@ export const NODE_FALLBACK_DIMENSIONS = {
   agent: { width: 360, height: 260 }, // Agent node
   default: { width: 320, height: 150 },
   gather: { width: 380, height: 35 }, // Gather node aligned with other cards' width
+  epoch_separator: { width: 380, height: 40 }, // Epoch separator - full width, minimal height
 };
 
 // 6 fixed heights for the content box (including padding)
 export const CONTENT_BOX_HEIGHTS = {
   XS: 0, // height is 0 for no content
   S: 24 + 16, // h-6 + padding
-  M: 80 + 16, // h-20 + padding  
+  M: 80 + 16, // h-20 + padding
   L: 144 + 16, // h-36 + padding
   XL: 208 + 16, // h-52 + padding
   XXL: 320 + 16, // h-80 + padding (capped for very long content)
@@ -26,7 +27,7 @@ export const CONTENT_BOX_HEIGHTS = {
 // Calculate content box height level based on content length
 const getContentHeightLevel = (content: string): 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL' => {
   if (!content) return 'XS'; // XS - no content
-  
+
   const length = content.length;
   if (length <= 50) return 'S'; // S - 1 line of text
   if (length <= 200) return 'M'; // M - 5 lines of text
@@ -104,12 +105,12 @@ export const getLayoutedElements = (
   parentMap.forEach((sources, targetId) => {
     if (sources.length > 1) {
       console.log(`🔧 Creating dummy node for target ${targetId} with ${sources.length} sources:`, sources);
-      
+
       const dummyNodeId = `dummy-${targetId}-${dummyNodeCounter++}`;
       const dummyNode: Node<FlowNodeData> = {
         id: dummyNodeId,
         type: 'custom',
-        data: { 
+        data: {
           label: 'Gathering Point',
           nodeType: 'gather',
           status: 'idle'
@@ -121,17 +122,17 @@ export const getLayoutedElements = (
       // Reroute edges to the dummy node
       hierarchyEdges = hierarchyEdges.filter(edge => edge.target !== targetId);
       sources.forEach(sourceId => {
-        hierarchyEdges.push({ 
-          id: `${sourceId}->${dummyNodeId}`, 
-          source: sourceId, 
+        hierarchyEdges.push({
+          id: `${sourceId}->${dummyNodeId}`,
+          source: sourceId,
           target: dummyNodeId,
           type: 'custom',
           animated: false
         });
       });
-      hierarchyEdges.push({ 
-        id: `${dummyNodeId}->${targetId}`, 
-        source: dummyNodeId, 
+      hierarchyEdges.push({
+        id: `${dummyNodeId}->${targetId}`,
+        source: dummyNodeId,
         target: targetId,
         type: 'custom',
         animated: false
@@ -159,7 +160,7 @@ export const getLayoutedElements = (
     id: 'root',
     type: 'custom',
     position: { x: 0, y: 0 }, // Dummy position for the root
-    data: { 
+    data: {
       label: 'Root',
       nodeType: 'turn' as const,
       status: 'idle' as const
@@ -170,11 +171,11 @@ export const getLayoutedElements = (
   // Use backend-provided depth instead of d3-hierarchy calculation
   // Create depth-based grouping using backend depth values
   const nodesByDepth = new Map<number, HierarchyNode<HierarchyDatum>[]>();
-  
+
   // Group nodes by their backend-provided depth
   hierarchyNodes.forEach((node) => {
     const backendDepth = node.data.depth;
-    
+
     // If backend doesn't provide depth, fall back to calculated depth
     let actualDepth: number;
     if (typeof backendDepth === 'number' && backendDepth > 0) {
@@ -191,11 +192,11 @@ export const getLayoutedElements = (
       actualDepth = fallbackDepth;
       console.warn(`Node ${node.id} missing backend depth, using fallback: ${actualDepth}`);
     }
-    
+
     if (!nodesByDepth.has(actualDepth)) {
       nodesByDepth.set(actualDepth, []);
     }
-    
+
     // Create a mock hierarchy node for compatibility with existing layout code
     const mockHierarchyNode: HierarchyNode<HierarchyDatum> = {
       data: {
@@ -210,7 +211,7 @@ export const getLayoutedElements = (
       x: 0,
       y: 0
     } as unknown as HierarchyNode<HierarchyDatum>;
-    
+
     nodesByDepth.get(actualDepth)!.push(mockHierarchyNode);
   });
 
@@ -218,7 +219,7 @@ export const getLayoutedElements = (
   const LEVEL_SPACING = 80; // Gap between levels (in pixels) - increased for better separation
   const MIN_NODE_HEIGHT = 200; // Minimum node height for consistent spacing - accounts for content boxes
   const VIEWPORT_CENTER_X = 500; // Center X coordinate for viewport
-  
+
   const levelYs = new Map<number, number>();
   let currentY = 0;
 
@@ -227,10 +228,10 @@ export const getLayoutedElements = (
   for (const depth of finalSortedDepths) {
     // Set the TOP Y coordinate for this level
     levelYs.set(depth, currentY);
-    
+
     const nodesOnLevel = nodesByDepth.get(depth) || [];
     let maxLevelHeight = MIN_NODE_HEIGHT; // Start with minimum height
-    
+
     // Find the tallest node on this level
     nodesOnLevel.forEach(node => {
       const { height } = getNodeSize(node, nodeSizes);
@@ -238,7 +239,7 @@ export const getLayoutedElements = (
         maxLevelHeight = height;
       }
     });
-    
+
     // Next level Y = current level Y + current level height + spacing
     currentY += maxLevelHeight + LEVEL_SPACING;
   }
@@ -246,10 +247,10 @@ export const getLayoutedElements = (
   // 3. Position nodes within each level with improved horizontal distribution
   // Calculate max content level for each layer
   const layerMaxContentLevels = new Map<number, 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL'>();
-  
+
   nodesByDepth.forEach((nodesOnLevel, depth) => {
     let maxContentLevel: 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL' = 'XS';
-    
+
     nodesOnLevel.forEach(node => {
       // Only calculate for turn nodes that have content
       if (node.data.data?.nodeType === 'turn') {
@@ -259,15 +260,15 @@ export const getLayoutedElements = (
         maxContentLevel = getMaxContentLevel(maxContentLevel, contentLevel);
       }
     });
-    
+
     layerMaxContentLevels.set(depth, maxContentLevel);
     console.log(`📏 Layer ${depth} max content level: ${maxContentLevel}`);
   });
-  
+
   // First, discover all unique agents and determine the maximum number of concurrent swim lanes
   const allAgentIds = new Set<string>();
   let maxConcurrentAgents = 1;
-  
+
   nodesByDepth.forEach((nodesOnLevel) => {
     const agentsOnLevel = new Set<string>();
     nodesOnLevel.forEach(node => {
@@ -279,17 +280,17 @@ export const getLayoutedElements = (
     });
     maxConcurrentAgents = Math.max(maxConcurrentAgents, agentsOnLevel.size);
   });
-  
+
   console.log(`🏊 Swim lanes: ${allAgentIds.size} unique agents, max ${maxConcurrentAgents} concurrent`);
-  
+
   // Establish fixed swim lane positions based on maximum concurrent agents
   // This ensures columns don't shift when new agents appear
   const agentColumnPositions = new Map<string, number>(); // agent_id -> x position (center of column)
   const SWIM_LANE_WIDTH = 420; // Width of each swim lane (node width + padding)
-  
+
   // Position swim lanes based on first occurrence order, but with fixed widths
   const agentOrder: string[] = []; // Track order agents first appear
-  
+
   nodesByDepth.forEach((nodesOnLevel, depth) => {
     nodesOnLevel.forEach(node => {
       const agentId = node.data.data?.agent_id;
@@ -298,11 +299,11 @@ export const getLayoutedElements = (
       }
     });
   });
-  
+
   // Calculate swim lane center positions
   const totalSwimLaneWidth = agentOrder.length * SWIM_LANE_WIDTH;
   const swimLaneStartX = VIEWPORT_CENTER_X - (totalSwimLaneWidth / 2) + (SWIM_LANE_WIDTH / 2);
-  
+
   agentOrder.forEach((agentId, index) => {
     const laneCenter = swimLaneStartX + (index * SWIM_LANE_WIDTH);
     agentColumnPositions.set(agentId, laneCenter);
@@ -312,11 +313,11 @@ export const getLayoutedElements = (
   // Now position nodes using their swim lane positions
   nodesByDepth.forEach((nodesOnLevel, depth) => {
     const levelY = levelYs.get(depth) || 0;
-    
+
     nodesOnLevel.forEach((node) => {
       const { width } = getNodeSize(node, nodeSizes);
       const agentId = node.data.data?.agent_id;
-      
+
       let x: number;
       if (agentId && agentColumnPositions.has(agentId)) {
         // Use the swim lane center, then offset to position left edge
@@ -326,7 +327,7 @@ export const getLayoutedElements = (
         // No agent ID - center the node
         x = VIEWPORT_CENTER_X - (width / 2);
       }
-      
+
       node.data.position = { x, y: levelY };
       console.log(`📍 Positioned ${node.data.data?.nodeType} node '${node.data.data?.label}' at (${x}, ${levelY}), agent: ${agentId || 'none'}`);
     });
@@ -338,7 +339,7 @@ export const getLayoutedElements = (
     let calculatedPosition = { x: 0, y: 0 };
     let actualDepth = node.data.depth || 0; // Use backend depth directly
     let layerMaxContentLevel: 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL' = 'XS';
-    
+
     for (const [depth, nodesOnLevel] of nodesByDepth) {
       const hierarchyNode = nodesOnLevel.find(h => h.data.id === node.id);
       if (hierarchyNode) {
@@ -348,7 +349,7 @@ export const getLayoutedElements = (
         break;
       }
     }
-    
+
     return {
       ...node,
       // Position uses top-left coordinates for React Flow
@@ -370,6 +371,6 @@ export const getLayoutedElements = (
     ...edge,
     type: 'custom'
   }));
-  
+
   return { nodes: finalNodes, edges: finalEdges };
 };

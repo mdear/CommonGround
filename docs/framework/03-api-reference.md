@@ -408,16 +408,17 @@ Represents the context for a specific Agent flow (e.g., Partner, Principal, Asso
 
 #### 4.4 `FlowViewModel`
 
-Describes the topology of the `FlowView`.
+Describes the topology of the `FlowView`. The view uses **epoch-based depth calculation** to ensure time flows top-to-bottom. Disconnected subgraphs (e.g., from separate Principal dispatches) are identified as separate "epochs" and rendered sequentially sorted by timestamp. When multiple epochs exist, visual epoch separator nodes are inserted between them.
 
 *   `nodes` (List[object]): A list of nodes. Each node object contains:
     *   `id` (string): The unique ID of the node.
     *   `type`: Fixed as `"custom"`.
     *   `data` (object): Node data, containing:
         *   `label` (string): The display name of the node.
-        *   `nodeType` (string): `"turn" | "gather"`.
+        *   `nodeType` (string): `"turn" | "gather" | "epoch_separator"`. The `epoch_separator` type is used to visually separate disconnected execution epochs (e.g., multiple Principal dispatches).
         *   `status` (string): `"idle" | "running" | "completed" | "error" | "cancelled"`.
-        *   `depth` (number, new): The depth of the node in the flow diagram, used for hierarchical layout.
+        *   `depth` (number): The depth of the node in the flow diagram, used for hierarchical layout. Depths are calculated per-epoch with offsets to ensure chronological top-to-bottom ordering.
+        *   `epoch_index` (number, optional): For `epoch_separator` nodes, indicates which epoch boundary this separator represents.
         *   `content_stream_id` (string | null): The stream ID used to associate `llm_chunk` events.
         *   `timestamp` (string): ISO 8601 timestamp.
         *   `originalId` (string): The ID of the original message or tool call associated with this node.
@@ -428,7 +429,7 @@ Describes the topology of the `FlowView`.
     *   `source` (string): The source node ID.
     *   `target` (string): The target node ID.
     *   `animated` (boolean): Whether to display an animation.
-    *   `edgeType` (string | null): The semantic type of the edge, such as `"return"`.
+    *   `edgeType` (string | null): The semantic type of the edge, such as `"return"` for gather nodes or `"epoch_boundary"` for connections to/from epoch separators.
 
 #### 4.5 `KanbanViewModel`
 
