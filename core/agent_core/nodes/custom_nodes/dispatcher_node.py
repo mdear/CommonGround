@@ -669,6 +669,16 @@ class DispatcherNode(AsyncParallelBatchNode):
                 "messages": final_associate_state.get("messages", []), "deliverables": deliverables_from_associate
             })
 
+            # Propagate deliverables to canonical work_modules[].deliverables field for easy access
+            # This ensures Principal/Partner can access deliverables without parsing context_archive
+            if deliverables_from_associate:
+                module_to_update["deliverables"] = deliverables_from_associate
+                logger.info("deliverables_propagated_to_module", extra={
+                    "module_id": module_id,
+                    "dispatch_id": executing_associate_id,
+                    "deliverable_keys": list(deliverables_from_associate.keys()) if isinstance(deliverables_from_associate, dict) else "non-dict"
+                })
+
             module_to_update["status"] = "pending_review"
             module_to_update["review_info"] = {
                 "trigger": "associate_completed" if associate_exec_status == "success" else "associate_failed",

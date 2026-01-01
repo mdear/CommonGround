@@ -115,9 +115,16 @@ text_definitions:
     <internal_system_directive>
     Observation: In your previous turn, you did not call any specific tool.
     Current Work Module: '{{ meta.module_description }}'
+
+    CRITICAL CHECK: Did you just output a JSON deliverable?
+    - If YES: You MUST call `finish_flow` NOW to complete your work and ensure your deliverable is captured!
+    - If NO: Continue with the instructions below.
+
     Instruction:
     1. Re-evaluate your progress on this module.
-    2. If you believe your work is complete, you MUST synthesis. In its `current_associate_findings` parameter, provide a comprehensive summary of your findings and deliverables. This will conclude your work on this module.
+    2. If you believe your work is complete, follow the Finish Protocol:
+       a. If you haven't summarized yet: Call `generate_message_summary` with your findings
+       b. If you already output JSON: Call `finish_flow` to complete
     3. If you are not finished, determine the next appropriate tool call to continue your work.
     4. If you are stuck, clearly explain why.
     </internal_system_directive>

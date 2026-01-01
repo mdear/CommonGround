@@ -23,7 +23,7 @@ from agent_core.framework.profile_utils import get_active_profile_by_name # For 
 from agent_profiles.loader import get_global_active_profile_by_logical_name_copy # For profile updates from global templates
 from agent_core.events.event_triggers import trigger_view_model_update # For view model updates
 from agent_core.nodes.custom_nodes.stage_planner_node import _apply_work_module_actions # For direct work module management
-from agent_core.utils.serialization import get_serializable_run_snapshot # New import
+from agent_core.utils.serialization import get_serializable_run_snapshot, get_paginated_run_snapshot # Updated import
 # Import connection manager for resilient connection handling
 from api.connection_manager import connection_manager
 
@@ -623,12 +623,44 @@ async def handle_request_run_profiles_message(ws_state: Dict, data: Dict):
 
 
 async def handle_request_run_context_message(ws_state: Dict, data: Dict):
-    """Handles 'request_run_context' messages, returning the serialized context information for the specified run."""
+    """
+    Handles 'request_run_context' messages with pagination support.
+    
+    Request format:
+    {
+        "type": "request_run_context",
+        "data": {
+            "run_id": "xxx",                    # Required
+            "mode": "summary"|"full"|"section", # Optional, default "summary"
+            "section": "meta"|"team_state"|"sub_contexts"|"knowledge_base",  # For mode="section"
+            "context_name": "_principal_context_ref",  # For sub_contexts section
+            "message_offset": 0,                # Pagination offset
+            "message_limit": 50                 # Pagination limit
+        }
+    }
+    
+    Modes:
+        - "summary": Lightweight overview (default) - always small response
+        - "full": Complete snapshot (may exceed WebSocket limits for large sessions)
+        - "section": Specific section with pagination
+    """
     event_manager = ws_state.event_manager # Changed: Using HEAD's way
     session_id_for_log = event_manager.session_id
 
     run_id = data.get("run_id")
-    logger.info("request_run_context_received", extra={"session_id": session_id_for_log, "run_id": run_id, "data": data})
+    mode = data.get("mode", "summary")  # Default to summary for safety
+    section = data.get("section")
+    context_name = data.get("context_name")
+    message_offset = data.get("message_offset", 0)
+    message_limit = data.get("message_limit", 50)
+    
+    logger.info("request_run_context_received", extra={
+        "session_id": session_id_for_log, 
+        "run_id": run_id, 
+        "mode": mode,
+        "section": section,
+        "data": data
+    })
 
     if not run_id:
         logger.warning("request_run_context_missing_run_id", extra={"session_id": session_id_for_log})
@@ -657,9 +689,22 @@ async def handle_request_run_context_message(ws_state: Dict, data: Dict):
         return
 
     try:
-        logger.debug("run_context_snapshot_starting", extra={"session_id": session_id_for_log, "run_id": run_id})
-        # sanitized_context = sanitize_context_for_serialization(run_context) # Old call
-        snapshot_context = get_serializable_run_snapshot(run_context) # New call
+        logger.debug("run_context_snapshot_starting", extra={
+            "session_id": session_id_for_log, 
+            "run_id": run_id,
+            "mode": mode
+        })
+        
+        # Use paginated snapshot for all modes
+        snapshot_context = get_paginated_run_snapshot(
+            run_context,
+            mode=mode,
+            section=section,
+            context_name=context_name,
+            message_offset=message_offset,
+            message_limit=message_limit
+        )
+        
         logger.debug("run_context_snapshot_completed", extra={"session_id": session_id_for_log, "run_id": run_id})
 
         await event_manager.send_json(
@@ -667,10 +712,14 @@ async def handle_request_run_context_message(ws_state: Dict, data: Dict):
             message={
                 "type": "run_context_response",
                 "run_id": run_id,
-                "data": {"context": snapshot_context} # Use the new snapshot
+                "data": {"context": snapshot_context}
             }
         )
-        logger.info("run_context_response_sent", extra={"session_id": session_id_for_log, "run_id": run_id})
+        logger.info("run_context_response_sent", extra={
+            "session_id": session_id_for_log, 
+            "run_id": run_id,
+            "mode": mode
+        })
     except Exception as e:
         logger.error("request_run_context_error", extra={"session_id": session_id_for_log, "run_id": run_id, "error_message": str(e)}, exc_info=True)
         await event_manager.send_json(

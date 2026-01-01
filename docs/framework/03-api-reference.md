@@ -183,11 +183,100 @@ Requests the full content of the `agent_profiles_store` for a specified run.
 
 #### 3.3.7 `request_run_context`
 
-Requests the complete, serialized `run_context` for a specified run.
+Requests the serialized `run_context` for a specified run. Supports three modes for efficient data retrieval:
 
 *   **`type`**: `"request_run_context"`
 *   **`data` (object, required)**:
-    *   `run_id` (string, required)
+    *   `run_id` (string, required): The target run's ID.
+    *   `mode` (string, optional): Query mode. Default: `"summary"`.
+        *   `"summary"`: Returns lightweight overview without full messages (always fast, small response).
+        *   `"full"`: Returns complete snapshot (may exceed WebSocket limits for large sessions).
+        *   `"section"`: Returns only the requested section with optional pagination.
+    *   `section` (string, required for mode="section"): Section to retrieve.
+        *   `"meta"`: Session metadata only.
+        *   `"team_state"`: Work modules and dispatch history.
+        *   `"sub_contexts"`: Agent contexts with message pagination.
+        *   `"knowledge_base"`: Knowledge base entries.
+    *   `context_name` (string, optional): For `sub_contexts` section, specifies which context to retrieve (e.g., `"_principal_context_ref"`, `"_partner_context_ref"`). If omitted, returns list of available contexts.
+    *   `message_offset` (integer, optional): Pagination offset for messages. Default: `0`.
+    *   `message_limit` (integer, optional): Maximum messages to return. Default: `50`.
+
+**Example: Summary Mode (Default)**
+```json
+{
+  "type": "request_run_context",
+  "data": {
+    "run_id": "my-run-id"
+  }
+}
+```
+
+**Example: Paginated Messages**
+```json
+{
+  "type": "request_run_context",
+  "data": {
+    "run_id": "my-run-id",
+    "mode": "section",
+    "section": "sub_contexts",
+    "context_name": "_principal_context_ref",
+    "message_offset": 0,
+    "message_limit": 50
+  }
+}
+```
+
+**Response Structure (Summary Mode)**
+```json
+{
+  "type": "run_context_response",
+  "run_id": "my-run-id",
+  "data": {
+    "context": {
+      "mode": "summary",
+      "meta": { "run_id": "...", "status": "...", "run_type": "..." },
+      "team_state": { "work_modules": {...}, "dispatch_history": [...] },
+      "sub_contexts_summary": {
+        "_principal_context_ref": {
+          "message_count": 150,
+          "inbox_count": 2,
+          "has_deliverables": true,
+          "deliverable_keys": ["final_report"],
+          "last_message": { "role": "assistant", "content_preview": "..." }
+        }
+      },
+      "knowledge_base_summary": { "key1": { "type": "string", "size": 100 } }
+    }
+  }
+}
+```
+
+**Response Structure (Paginated Sub-Contexts)**
+```json
+{
+  "type": "run_context_response",
+  "run_id": "my-run-id",
+  "data": {
+    "context": {
+      "mode": "section",
+      "section": "sub_contexts",
+      "context_name": "_principal_context_ref",
+      "data": {
+        "messages": [...],
+        "inbox": [...],
+        "deliverables": {...}
+      },
+      "pagination": {
+        "total_messages": 150,
+        "offset": 0,
+        "limit": 50,
+        "returned": 50,
+        "has_more": true
+      }
+    }
+  }
+}
+```
 
 #### 3.3.8 `request_knowledge_base`
 
@@ -292,7 +381,11 @@ Represents the top-level context for a business run, serving as the single sourc
 
 State stored in the `RunContext` and shared by all team members.
 
-*   `work_modules` (Dict[str, object]): A dictionary with `module_id` as the key and the work module object as the value. This is the core of the project state.
+*   `work_modules` (Dict[str, object]): A dictionary with `module_id` as the key and the work module object as the value. This is the core of the project state. Each work module contains:
+    *   `module_id` (string): Unique identifier for the module.
+    *   `status` (string): Current status (`pending`, `in_progress`, `pending_review`, `completed`).
+    *   `context_archive` (List[object]): Archived Associate contexts upon completion.
+    *   `deliverables` (object | null): Propagated deliverables from the completed Associate. This field is automatically populated by the `DispatcherNode` when an Associate completes, copying the `deliverables` from `context_archive` for easy access.
 *   `question` (str): The core research question.
 *   `profiles_list_instance_ids` (List[str]): A list of Associate Profile instance IDs available to the Principal.
 *   `is_principal_flow_running` (bool): Whether the Principal is currently running.

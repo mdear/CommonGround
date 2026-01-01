@@ -125,7 +125,41 @@ graph TD
     3.  **Deliverable Submission**: After completing the task, calls the `generate_message_summary` tool to get an instructional prompt, then summarizes the results into a structured JSON `deliverables` object.
 *   **Context and State**: Each Associate Agent operates in an isolated context. **The key difference is** that upon completion, its **entire context** (message history, `deliverables`, etc.) is **collected by the `DispatcherNode` and archived into the `context_archive` of the specific work module it handled**. The system also intelligently filters this context to prevent irrelevant history from being passed on to subsequent agents, optimizing token usage. This realizes the core concept of "context follows the work."
 
-### 2.4 Context Inheritance Between Associates
+### 2.4 Deliverable Propagation and Final Report Access
+
+When an Associate completes its work, its `deliverables` are archived to `context_archive`. To make these deliverables easily accessible, the system automatically propagates them:
+
+**Deliverable Propagation Flow:**
+1.  **Associate Completion**: Associate generates structured `deliverables` JSON and calls `finish_flow`.
+2.  **Context Archive**: The `DispatcherNode` archives the Associate's complete context (including deliverables) to `work_modules[module_id].context_archive`.
+3.  **Propagation**: The system copies `deliverables` from the archived context to `work_modules[module_id].deliverables` for direct access.
+
+This allows agents and tools to access deliverables without parsing the nested `context_archive` structure.
+
+**Final Report Access for Partner:**
+
+When the Principal completes its work and generates a final Markdown report, the Partner needs easy access to this report to serve it to the user. The `GetPrincipalStatusSummaryTool` provides this through the `final_report` field:
+
+```json
+{
+  "detailed_report": {
+    "is_marked_complete": true,
+    "final_report": {
+      "content": "# Research Report\n\n## Executive Summary...",
+      "char_count": 74000,
+      "title": "Research Report"
+    },
+    "ATTENTION": "✅ FINAL REPORT READY: The Principal has completed a 74,000 character report titled 'Research Report'. Use final_report.content to serve this to the user."
+  }
+}
+```
+
+When `final_report` is present, the Partner should:
+1.  Present the `final_report.content` directly to the user
+2.  Format it appropriately (the content is already in Markdown)
+3.  Avoid unnecessary calls to other tools to retrieve the same content
+
+### 2.5 Context Inheritance Between Associates
 
 When an Associate needs context from previously completed work modules (e.g., a synthesis task that builds on research tasks), the Principal can specify `inherit_messages_from` in the dispatch call.
 

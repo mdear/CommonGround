@@ -267,7 +267,29 @@ class GetPrincipalStatusSummaryTool(AsyncNode):
 
         summary_for_llm = "\n".join(status_parts)
 
-        # 7. Prepare detailed_report (with staleness info)
+        # 7. Extract final report if Principal is marked complete
+        # This allows Partner to access the full report content directly without parsing message history
+        final_report = None
+        if is_marked_complete:
+            for msg in reversed(principal_messages):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    # Validate: substantial markdown content (final reports are typically >5K chars)
+                    if content and content.strip().startswith("#") and len(content) > 5000:
+                        # Extract title from first line
+                        first_line = content.split('\n')[0].lstrip('#').strip()
+                        final_report = {
+                            "content": content,
+                            "char_count": len(content),
+                            "title": first_line[:100] if first_line else "Research Report",
+                        }
+                        logger.info("final_report_extracted", extra={
+                            "char_count": len(content),
+                            "title": final_report["title"][:50]
+                        })
+                        break
+
+        # 8. Prepare detailed_report (with staleness info and final report)
         detailed_report = {
             "task_handle_status_raw": str(principal_task_handle),
             "principal_task_handle_status_text": principal_task_handle_status_text,
@@ -277,7 +299,9 @@ class GetPrincipalStatusSummaryTool(AsyncNode):
             "message_count": len(principal_messages),
             "work_modules_snapshot_from_team_state_raw": principal_work_modules,
             "full_message_history_raw": principal_messages,
-            # New staleness detection fields
+            # Final report extraction (when Principal is complete)
+            "final_report": final_report,
+            # Staleness detection fields
             "staleness_detection": {
                 "is_session_orphaned": is_session_orphaned,
                 "stale_modules": stale_modules,
@@ -294,14 +318,27 @@ class GetPrincipalStatusSummaryTool(AsyncNode):
                 "max_minutes_stale": max(m["minutes_since_update"] for m in stale_modules) if stale_modules else 0
             })
 
+        # 9. Build ATTENTION message based on state
+        if final_report:
+            attention_msg = (
+                f"✅ FINAL REPORT READY: The Principal has completed a {final_report['char_count']:,} character report "
+                f"titled \"{final_report['title']}\". The full markdown content is available in detailed_report.final_report.content. "
+                "You can: (1) Display it directly to the user, (2) Offer to save it as a .md file, (3) Summarize key sections, or (4) Answer questions about specific parts."
+            )
+        elif is_session_orphaned:
+            attention_msg = (
+                "⚠️ CRITICAL: This session appears to be ORPHANED. The modules shown as 'ongoing' are NOT actually running. "
+                "You MUST inform the user that this research was interrupted and the work was NOT completed. "
+                "Do NOT tell the user to 'wait' or that work is 'in progress' - it is NOT."
+            )
+        else:
+            attention_msg = "DO NOT call this tool again in your next turn, unless user explicitly asks for update. This tool is designed to be called once a while, not every turn."
+
         return {
             "status": "success" if not is_session_orphaned else "warning_orphaned_session",
             "summary_for_llm": summary_for_llm,
             "detailed_report": detailed_report,
-            "ATTENTION": "DO NOT call this tool again in your next turn, unless user explicitly asks for update. This tool is designed to be called once a while, not every turn." if not is_session_orphaned else
-                        "⚠️ CRITICAL: This session appears to be ORPHANED. The modules shown as 'ongoing' are NOT actually running. "
-                        "You MUST inform the user that this research was interrupted and the work was NOT completed. "
-                        "Do NOT tell the user to 'wait' or that work is 'in progress' - it is NOT.",
+            "ATTENTION": attention_msg,
         }
 
     async def post_async(self, partner_context: Dict, prep_res: Dict, exec_res: Dict):

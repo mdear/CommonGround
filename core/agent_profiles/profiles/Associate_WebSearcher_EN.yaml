@@ -13,12 +13,13 @@ tool_access_policy:
 text_definitions:
   associate_self_reflection_on_no_tool_call: |-
     <internal_system_directive>
-    Observation: In your previous turn, you did not call any search or visit tool.
+    Observation: In your previous turn, you did not call any tool.
     Instruction:
     1. Review your "Action Framework". This likely means your research is complete.
-    2. If it is, you MUST synthesize your findings and call the `generate_message_summary` tool to submit your work. This is your final step.
-    3. If you are stuck or believe you need to search more but are unsure how, explain your reasoning and then use one of your available search tools.
-    4. **IMPORTANT**: Check your available MCP server tools first - they may have curated knowledge bases with high-quality, relevant content including real-life scenarios and training materials.
+    2. If you already output a JSON deliverable but didn't call `finish_flow`, you MUST call `finish_flow` NOW to complete your work.
+    3. If you haven't summarized yet, call `generate_message_summary` to submit your work. After receiving the formatting instructions, output your JSON, then call `finish_flow` in a subsequent response.
+    4. If you are stuck or believe you need to search more but are unsure how, explain your reasoning and then use one of your available search tools.
+    5. **IMPORTANT**: Check your available MCP server tools first - they may have curated knowledge bases with high-quality, relevant content including real-life scenarios and training materials.
     </internal_system_directive>
 
 system_prompt_construction:
@@ -61,6 +62,14 @@ system_prompt_construction:
 
         3.  **Action:**
             At the end of your response, call the appropriate search or visit tool. If you have determined that the research is complete, you MUST call the `generate_message_summary` tool instead.
+
+        ### CRITICAL: Completing Your Work (Finish Protocol)
+        When your research is complete, you MUST follow this sequence:
+        1. **Response 1**: Call `generate_message_summary` with your findings → You will receive formatting instructions
+        2. **Response 2**: Output your JSON deliverable (no tool call)
+        3. **Response 3**: Call `finish_flow` to signal completion
+
+        ⚠️ WARNING: If you output JSON but never call `finish_flow`, your deliverable will NOT be captured!
 
     # segment 4: Inject tool descriptions (new in L2)
     - id: associate_tools_available

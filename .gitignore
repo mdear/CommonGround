@@ -14,3 +14,4 @@ repomix-*
 # Local logs
 logs
 logs/*
+debug_logs/

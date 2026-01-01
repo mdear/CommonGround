@@ -223,7 +223,15 @@ Based on your preliminary findings and your entire message history for this task
 ```
 
 ## Action:
-In your next turn, provide ONLY the final JSON object in the 'content' field of your response. DO NOT call any tools. This will be your final output for this work module.
+1. In your NEXT response, provide the final JSON object in the 'content' field. Do NOT call any tools in that response.
+2. In the FOLLOWING response, call `finish_flow` to signal completion.
+
+This two-step process ensures your deliverable is properly captured. Example sequence:
+
+**Response 1 (JSON):** `{{"primary_summary": "## My Findings\\n..."}}`
+**Response 2 (Finish):** Call `finish_flow(reason="Deliverable submitted")`
+
+⚠️ CRITICAL: You MUST call `finish_flow` after outputting your JSON - otherwise your work will not be captured!
 </system_directive>
         """
 

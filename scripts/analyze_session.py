@@ -20,6 +20,13 @@ Input:
     - A session URL: http://localhost:3800/webview/r?id=tentacled-pearl-oriole
     - Just a session ID: tentacled-pearl-oriole
 
+Data Source:
+    --live          - Pull real-time state from running server (requires active session)
+    --server URL    - WebSocket server URL (default: ws://127.0.0.1:8000)
+    
+    By default, analyzes persisted JSON files. Use --live to query in-memory state
+    for sessions that haven't checkpointed yet.
+
 Modes (what to analyze):
     summary   - High-level overview with issue detection (default)
     detailed  - Per-agent breakdown with key metrics and tool usage
@@ -29,9 +36,10 @@ Modes (what to analyze):
     timeline  - Chronological event trace
     errors    - Focus on errors and issues only
     all       - Run all analysis modes sequentially
-              ⚠️  WARNING: 'all' produces very large output that may crash
+              ⚠️  WARNING TO AGENTS: 'all' produces very large output that may crash
               some environments (e.g., VS Code agent terminal). Call modes
-              individually instead, or redirect output to a file.
+              individually instead, or redirect output to a file within
+              your workspace and then read that file.
 
 Agent Filter (optional, narrows scope):
     --agent principal  - Focus on Principal agent
@@ -43,19 +51,27 @@ Output Options:
     --no-color  - Disable colored output
 
 Examples:
+    # Analyze persisted session (default)
     python analyze_session.py tentacled-pearl-oriole
     python analyze_session.py tentacled-pearl-oriole --mode detailed
+    
+    # Analyze live session (real-time from server memory)
+    python analyze_session.py dangerous-colorful-okapi --live
+    python analyze_session.py dangerous-colorful-okapi --live --server ws://localhost:8800
+    python analyze_session.py dangerous-colorful-okapi --live --mode tokens
+    
+    # Other examples
     python analyze_session.py tentacled-pearl-oriole --mode tokens
     python analyze_session.py tentacled-pearl-oriole --mode handoff
-    python analyze_session.py tentacled-pearl-oriole --mode thrashing
-    python analyze_session.py tentacled-pearl-oriole --mode all
     python analyze_session.py tentacled-pearl-oriole --mode detailed --agent WM_1
     python analyze_session.py tentacled-pearl-oriole --json
 """
 
 import argparse
+import asyncio
 import json
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -147,6 +163,76 @@ def resolve_session_input(input_str: str) -> Path:
         )
 
     raise ValueError(f"Could not parse session input: {input_str}")
+
+
+def fetch_live_session_data(run_id: str, server_url: str) -> Optional[Path]:
+    """
+    Fetch live session data from the server using live_session_query.py.
+    
+    This imports the LiveSessionClient to avoid code duplication.
+    Returns path to a temporary JSON file with reconstructed state.
+    
+    Args:
+        run_id: The session/run ID to query
+        server_url: WebSocket server URL (e.g., ws://127.0.0.1:8800)
+    
+    Returns:
+        Path to temporary JSON file, or None on error
+    """
+    try:
+        # Import from live_session_query (same directory)
+        from live_session_query import LiveSessionClient
+    except ImportError:
+        print(f"{Colors.RED}Error: Could not import LiveSessionClient from live_session_query.py{Colors.RESET}")
+        print(f"Make sure live_session_query.py is in the same directory as this script.")
+        return None
+    
+    async def _fetch():
+        client = LiveSessionClient(server_url)
+        try:
+            await client.connect()
+            reconstructed = await client.reconstruct_full_state(run_id, message_page_size=100)
+            return reconstructed
+        finally:
+            await client.close()
+    
+    try:
+        print(f"{Colors.CYAN}Fetching live state for: {run_id}{Colors.RESET}")
+        print(f"{Colors.GRAY}Server: {server_url}{Colors.RESET}")
+        
+        reconstructed = asyncio.run(_fetch())
+        
+        # Save to a temporary file for analyze_session to process
+        temp_file = tempfile.NamedTemporaryFile(
+            mode='w', 
+            suffix='.json', 
+            prefix=f'{run_id}_live_',
+            delete=False
+        )
+        json.dump(reconstructed, temp_file, indent=2, default=str)
+        temp_file.close()
+        
+        return Path(temp_file.name)
+        
+    except Exception as e:
+        error_msg = str(e)
+        if "Run ID not found" in error_msg:
+            print(f"{Colors.RED}Error: Session '{run_id}' not found in server memory.{Colors.RESET}")
+            print(f"\nPossible reasons:")
+            print(f"  - The session has ended or was never started")
+            print(f"  - The server was restarted (in-memory state cleared)")
+            print(f"  - Wrong server URL (try --server ws://host:port)")
+            print(f"\nTry analyzing the persisted JSON instead (without --live):")
+            print(f"  python analyze_session.py {run_id}")
+        elif "websockets" in error_msg.lower() or "aiohttp" in error_msg.lower():
+            print(f"{Colors.RED}Error: Missing dependencies for live mode.{Colors.RESET}")
+            print(f"Install with: pip install websockets aiohttp")
+        elif "Connection refused" in error_msg or "Cannot connect" in error_msg:
+            print(f"{Colors.RED}Error: Cannot connect to server at {server_url}{Colors.RESET}")
+            print(f"Is the CommonGround backend running?")
+        else:
+            print(f"{Colors.RED}Error fetching live state: {e}{Colors.RESET}")
+        return None
 
 
 # =============================================================================
@@ -259,7 +345,7 @@ def get_context_limit(model_name: str) -> int:
     # Fallback defaults - use improved matching
     model_lower = model_name.lower()
 
-    # Claude models - all have 200K context
+    # Claude models - 200K default (1M requires anthropic-beta header, checked separately)
     if "claude" in model_lower:
         return 200000
 
@@ -345,6 +431,9 @@ def analyze_partner(sub_contexts: Dict) -> Optional[AgentSummary]:
 
     messages = partner_ctx.get("messages", [])
     model = partner_ctx.get("model", DEFAULT_MODEL)
+    
+    # Check for context budget from the guardian (has accurate limit including 1M beta)
+    context_budget = partner_ctx.get("_context_budget", {})
 
     summary = AgentSummary(
         agent_id="Partner",
@@ -353,6 +442,22 @@ def analyze_partner(sub_contexts: Dict) -> Optional[AgentSummary]:
     )
 
     summary.tokens, summary.tool_calls, summary.errors = analyze_messages(messages, model)
+    
+    # Use guardian's context budget if available (has accurate limit including 1M beta header)
+    if context_budget:
+        utilization = context_budget.get("utilization_percent", 0)
+        remaining = context_budget.get("remaining_tokens", 0)
+        status = context_budget.get("status", "UNKNOWN")
+        
+        # Calculate actual context limit from utilization and remaining
+        if utilization > 0 and remaining > 0:
+            # context_limit = remaining / (1 - utilization/100)
+            actual_limit = int(remaining / (1 - utilization / 100))
+            summary.tokens.context_limit = actual_limit
+        
+        summary.tokens.utilization_percent = utilization
+        summary.tokens.status = status
+    
     summary.status = summary.tokens.status
 
     return summary
@@ -367,8 +472,8 @@ def analyze_principal(sub_contexts: Dict) -> Optional[AgentSummary]:
     messages = principal_ctx.get("messages", [])
     model = principal_ctx.get("model", DEFAULT_MODEL)
 
-    # Check for context_budget status in the context
-    budget_status = principal_ctx.get("context_budget", {})
+    # Check for context budget from the guardian (has accurate limit including 1M beta)
+    context_budget = principal_ctx.get("_context_budget", {})
 
     summary = AgentSummary(
         agent_id="Principal",
@@ -378,13 +483,21 @@ def analyze_principal(sub_contexts: Dict) -> Optional[AgentSummary]:
 
     summary.tokens, summary.tool_calls, summary.errors = analyze_messages(messages, model)
 
-    # Use stored budget status if available
-    if budget_status:
-        summary.tokens.status = budget_status.get("status", summary.tokens.status)
-        if budget_status.get("utilization_percent"):
-            summary.tokens.utilization_percent = budget_status["utilization_percent"]
-    else:
-        summary.status = summary.tokens.status
+    # Use guardian's context budget if available (has accurate limit including 1M beta header)
+    if context_budget:
+        utilization = context_budget.get("utilization_percent", 0)
+        remaining = context_budget.get("remaining_tokens", 0)
+        status = context_budget.get("status", "UNKNOWN")
+        
+        # Calculate actual context limit from utilization and remaining
+        if utilization > 0 and remaining > 0:
+            actual_limit = int(remaining / (1 - utilization / 100))
+            summary.tokens.context_limit = actual_limit
+        
+        summary.tokens.utilization_percent = utilization
+        summary.tokens.status = status
+    
+    summary.status = summary.tokens.status
 
     return summary
 
@@ -610,6 +723,19 @@ def print_summary(analysis: SessionAnalysis):
     """Print summary level output."""
     print_header(f"SESSION ANALYSIS: {analysis.session_id}")
 
+    # Check if session has RUNNING dispatches (may be live)
+    running_dispatches = [
+        wm_id for wm_id, wm in analysis.work_modules.items()
+        if "RUNNING" in wm.dispatch_status.upper()
+    ]
+    if running_dispatches:
+        print(f"\n{Colors.YELLOW}⚠ LIVE SESSION WARNING:{Colors.RESET}")
+        print(f"  {Colors.YELLOW}This analysis is based on a persisted JSON snapshot.{Colors.RESET}")
+        print(f"  {Colors.YELLOW}Modules showing RUNNING ({', '.join(running_dispatches)}) may be:{Colors.RESET}")
+        print(f"  {Colors.YELLOW}  • Actively executing (state not yet persisted){Colors.RESET}")
+        print(f"  {Colors.YELLOW}  • Truly orphaned (if session was interrupted){Colors.RESET}")
+        print(f"  {Colors.YELLOW}Re-run this analysis after the session completes for accurate results.{Colors.RESET}")
+
     print(f"\n{Colors.BOLD}Session Info:{Colors.RESET}")
     print(f"  Run Type: {analysis.run_type}")
     print(f"  Status: {status_color(analysis.status)}{analysis.status}{Colors.RESET}")
@@ -833,6 +959,9 @@ def print_handoff_analysis(analysis: SessionAnalysis, session_path: Path = None)
                 if primary:
                     preview = primary[:150].replace("\n", " ")
                     print(f"      Preview: {Colors.GRAY}{preview}...{Colors.RESET}")
+        elif status in ["ongoing", "in_progress"]:
+            # For running modules, empty context_archive is expected (state is in memory)
+            print(f"    {Colors.GRAY}○ No context_archive yet (module is {status} - state in memory){Colors.RESET}")
         else:
             print(f"    {Colors.RED}✗ No deliverables in context_archive{Colors.RESET}")
         
@@ -843,6 +972,8 @@ def print_handoff_analysis(analysis: SessionAnalysis, session_path: Path = None)
         )]
         if finish_calls:
             print(f"    {Colors.GREEN}✓ finish_flow called {len(finish_calls)} time(s){Colors.RESET}")
+        elif status in ["ongoing", "in_progress"]:
+            print(f"    {Colors.GRAY}○ finish_flow not called yet (module still {status}){Colors.RESET}")
         else:
             print(f"    {Colors.RED}✗ finish_flow NOT called - agent may not have completed properly{Colors.RESET}")
 
@@ -1410,6 +1541,12 @@ def main():
     parser.add_argument("--json", action="store_true",
                        help="Output as JSON instead of formatted text")
     
+    # Live session options
+    parser.add_argument("--live", action="store_true",
+                       help="Pull real-time state from running server instead of persisted JSON")
+    parser.add_argument("--server", default="ws://127.0.0.1:8000",
+                       help="WebSocket server URL for --live mode (default: ws://127.0.0.1:8000)")
+    
     # Legacy support for old arguments
     parser.add_argument("--level", "-l", dest="legacy_level", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--focus", "-f", dest="legacy_focus", default=None, help=argparse.SUPPRESS)
@@ -1433,13 +1570,20 @@ def main():
             if not attr.startswith("_"):
                 setattr(Colors, attr, "")
 
-    # Resolve session input to file path
-    try:
-        session_path = resolve_session_input(args.session_input)
-        print(f"{Colors.GRAY}Resolved session: {session_path}{Colors.RESET}\n")
-    except (FileNotFoundError, ValueError) as e:
-        print(f"{Colors.RED}Error: {e}{Colors.RESET}")
-        sys.exit(1)
+    # Handle live mode - pull data from server
+    if args.live:
+        session_path = fetch_live_session_data(args.session_input, args.server)
+        if session_path is None:
+            sys.exit(1)
+        print(f"{Colors.CYAN}[LIVE]{Colors.RESET} {Colors.GRAY}Analyzing real-time state from server{Colors.RESET}\n")
+    else:
+        # Resolve session input to file path
+        try:
+            session_path = resolve_session_input(args.session_input)
+            print(f"{Colors.GRAY}Resolved session: {session_path}{Colors.RESET}\n")
+        except (FileNotFoundError, ValueError) as e:
+            print(f"{Colors.RED}Error: {e}{Colors.RESET}")
+            sys.exit(1)
 
     # Perform analysis
     try:
