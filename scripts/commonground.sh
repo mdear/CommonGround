@@ -17,8 +17,28 @@ VENV_DIR="$HOME/workspaces/venvs/CommonGround"
 PID_DIR="$PROJECT_DIR/.pids"
 LOG_DIR="$PROJECT_DIR/logs"
 
-BACKEND_PORT=8800
-FRONTEND_PORT=3800
+# =============================================================================
+# PORT CONFIGURATION: Read from .env (Single Source of Truth)
+# =============================================================================
+ENV_FILE="$PROJECT_DIR/core/.env"
+
+# Function to read a variable from .env file
+read_env_var() {
+    local var_name="$1"
+    local default_value="$2"
+    if [[ -f "$ENV_FILE" ]]; then
+        local value=$(grep -E "^${var_name}=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
+        if [[ -n "$value" ]]; then
+            echo "$value"
+            return
+        fi
+    fi
+    echo "$default_value"
+}
+
+BACKEND_PORT=$(read_env_var "BACKEND_PORT" "8800")
+FRONTEND_PORT=$(read_env_var "FRONTEND_PORT" "3800")
+API_HOST=$(read_env_var "API_HOST" "0.0.0.0")
 
 # Create directories
 mkdir -p "$PID_DIR" "$LOG_DIR"
@@ -295,8 +315,14 @@ status_frontend() {
 
 clean_frontend() {
     log_info "Clearing Next.js cache..."
-    rm -rf "$PROJECT_DIR/frontend/.next"
-    rm -rf "$PROJECT_DIR/frontend/node_modules/.cache"
+    # Use --force and suppress errors (files may be held briefly after process stops)
+    rm -rf "$PROJECT_DIR/frontend/.next" 2>/dev/null || true
+    rm -rf "$PROJECT_DIR/frontend/node_modules/.cache" 2>/dev/null || true
+    # Retry once if directory still exists (race condition with process cleanup)
+    if [[ -d "$PROJECT_DIR/frontend/.next" ]]; then
+        sleep 0.5
+        rm -rf "$PROJECT_DIR/frontend/.next" 2>/dev/null || true
+    fi
     log_info "Next.js cache cleared"
 }
 

@@ -17,12 +17,12 @@ Usage:
 Input:
     Can be either:
     - A file path: projects/MyProject/session-id.json
-    - A session URL: http://localhost:3800/webview/r?id=tentacled-pearl-oriole
+    - A session URL: http://localhost:<FRONTEND_PORT>/webview/r?id=tentacled-pearl-oriole
     - Just a session ID: tentacled-pearl-oriole
 
 Data Source:
     --live          - Pull real-time state from running server (requires active session)
-    --server URL    - WebSocket server URL (default: ws://127.0.0.1:8000)
+    --server URL    - WebSocket server URL (default port read from commonground.sh)
     
     By default, analyzes persisted JSON files. Use --live to query in-memory state
     for sessions that haven't checkpointed yet.
@@ -57,7 +57,6 @@ Examples:
     
     # Analyze live session (real-time from server memory)
     python analyze_session.py dangerous-colorful-okapi --live
-    python analyze_session.py dangerous-colorful-okapi --live --server ws://localhost:8800
     python analyze_session.py dangerous-colorful-okapi --live --mode tokens
     
     # Other examples
@@ -88,6 +87,26 @@ PROJECTS_DIR = CORE_DIR / "projects"
 sys.path.insert(0, str(CORE_DIR))
 
 
+def get_port_from_env(var_name: str, default: int) -> int:
+    """Read a port from core/.env file (single source of truth)."""
+    env_file = CORE_DIR / ".env"
+    
+    if env_file.exists():
+        try:
+            content = env_file.read_text()
+            match = re.search(rf'^{var_name}=(\d+)', content, re.MULTILINE)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
+    
+    return default
+
+
+DEFAULT_BACKEND_PORT = get_port_from_env("BACKEND_PORT", 8800)
+DEFAULT_FRONTEND_PORT = get_port_from_env("FRONTEND_PORT", 3800)
+
+
 # =============================================================================
 # INPUT RESOLUTION
 # =============================================================================
@@ -98,7 +117,7 @@ def resolve_session_input(input_str: str) -> Path:
 
     Accepts:
     - Full file path: /path/to/session.json or projects/MyProject/session.json
-    - URL: http://localhost:3800/webview/r?id=session-id
+    - URL: http://localhost:<port>/webview/r?id=session-id (port from commonground.sh)
     - Session ID: tentacled-pearl-oriole
 
     Returns:
@@ -277,6 +296,16 @@ class AgentSummary:
 
 
 @dataclass
+class PrincipalEpoch:
+    """A single principal execution session (epoch)."""
+    session_id: str
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    termination_reason: str = "unknown"
+    duration_seconds: float = 0.0
+
+
+@dataclass
 class WorkModuleSummary:
     """Summary of a work module."""
     module_id: str
@@ -315,6 +344,9 @@ class SessionAnalysis:
     dispatch_count: int = 0
     successful_dispatches: int = 0
 
+    # Principal epochs (separate LLM invocations)
+    epochs: List[PrincipalEpoch] = field(default_factory=list)
+
     # Issues detected
     issues: List[Dict] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -333,6 +365,9 @@ def estimate_tokens(content: Any) -> int:
 
 def get_context_limit(model_name: str) -> int:
     """Get context limit for a model. Tries to use guardian if available."""
+    if not model_name:
+        model_name = DEFAULT_MODEL
+        
     try:
         from agent_core.framework.context_budget_guardian import get_model_context_limit
         return get_model_context_limit(model_name)
@@ -575,6 +610,51 @@ def analyze_work_modules(team_state: Dict) -> Dict[str, WorkModuleSummary]:
     return summaries
 
 
+def analyze_epochs(team_state: Dict) -> List[PrincipalEpoch]:
+    """Extract principal execution sessions (epochs) from team_state."""
+    epochs = []
+    principal_sessions = team_state.get("principal_execution_sessions", [])
+    
+    for session in principal_sessions:
+        if not isinstance(session, dict):
+            continue
+        
+        start_time = session.get("start_time")
+        end_time = session.get("end_time")
+        
+        # Calculate duration if both times available
+        duration_seconds = 0.0
+        if start_time and end_time:
+            try:
+                from datetime import datetime
+                # Parse ISO format timestamps
+                start_str = start_time.replace("+00:00", "Z").replace("Z", "+00:00")
+                end_str = end_time.replace("+00:00", "Z").replace("Z", "+00:00")
+                
+                # Handle different formats
+                for fmt in ["%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"]:
+                    try:
+                        start_dt = datetime.strptime(start_str, fmt)
+                        end_dt = datetime.strptime(end_str, fmt)
+                        duration_seconds = (end_dt - start_dt).total_seconds()
+                        break
+                    except ValueError:
+                        continue
+            except Exception:
+                pass
+        
+        epoch = PrincipalEpoch(
+            session_id=session.get("session_id", "unknown"),
+            start_time=start_time,
+            end_time=end_time,
+            termination_reason=session.get("termination_reason", "unknown"),
+            duration_seconds=duration_seconds
+        )
+        epochs.append(epoch)
+    
+    return epochs
+
+
 def detect_issues(analysis: SessionAnalysis) -> List[Dict]:
     """Detect potential issues in the session."""
     issues = []
@@ -642,6 +722,9 @@ def analyze_session(session_path: Path) -> SessionAnalysis:
     analysis.partner = analyze_partner(sub_contexts)
     analysis.principal = analyze_principal(sub_contexts)
     analysis.work_modules = analyze_work_modules(team_state)
+    
+    # Extract principal epochs (separate LLM invocations)
+    analysis.epochs = analyze_epochs(team_state)
 
     # Calculate aggregates
     if analysis.partner:
@@ -746,6 +829,21 @@ def print_summary(analysis: SessionAnalysis):
     print(f"  Total Tokens: ~{analysis.total_tokens:,}")
     print(f"  Total Tool Calls: {analysis.total_tool_calls:,}")
     print(f"  Dispatches: {analysis.successful_dispatches}/{analysis.dispatch_count} successful")
+
+    # Principal Epochs (separate LLM invocations)
+    if analysis.epochs:
+        print(f"\n{Colors.BOLD}Principal Epochs ({len(analysis.epochs)} invocations):{Colors.RESET}")
+        total_epoch_duration = sum(e.duration_seconds for e in analysis.epochs if e.duration_seconds)
+        for i, epoch in enumerate(analysis.epochs):
+            termination_reason = epoch.termination_reason or "running"
+            reason_color = Colors.GREEN if "success" in termination_reason.lower() else Colors.YELLOW
+            duration_str = f"{epoch.duration_seconds:.1f}s" if epoch.duration_seconds and epoch.duration_seconds > 0 else "running..."
+            # Format timestamps for display (just time portion)
+            start_display = epoch.start_time[11:19] if epoch.start_time else "?"
+            end_display = epoch.end_time[11:19] if epoch.end_time else "running"
+            print(f"  {Colors.CYAN}Epoch {i+1}{Colors.RESET}: {start_display} → {end_display} ({duration_str}) - {reason_color}{termination_reason}{Colors.RESET}")
+        if total_epoch_duration > 0:
+            print(f"  {Colors.GRAY}Total principal runtime: {total_epoch_duration:.1f}s{Colors.RESET}")
 
     # Agent overview
     print_subheader("AGENT OVERVIEW")
@@ -1544,8 +1642,8 @@ def main():
     # Live session options
     parser.add_argument("--live", action="store_true",
                        help="Pull real-time state from running server instead of persisted JSON")
-    parser.add_argument("--server", default="ws://127.0.0.1:8000",
-                       help="WebSocket server URL for --live mode (default: ws://127.0.0.1:8000)")
+    parser.add_argument("--server", default=f"ws://127.0.0.1:{DEFAULT_BACKEND_PORT}",
+                       help=f"WebSocket server URL for --live mode (default: ws://127.0.0.1:{DEFAULT_BACKEND_PORT})")
     
     # Legacy support for old arguments
     parser.add_argument("--level", "-l", dest="legacy_level", default=None, help=argparse.SUPPRESS)

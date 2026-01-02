@@ -524,4 +524,72 @@ def protocol_aware_ingestor(payload: Any, params: Dict, context: Dict) -> str:
 
     return "\n".join(lines)
 
+
+@register_ingestor("principal_completed_ingestor")
+def principal_completed_ingestor(payload: Any, params: Dict, context: Dict) -> str:
+    """
+    Specialized ingestor for PRINCIPAL_COMPLETED events.
+    
+    This ingestor:
+    1. Formats the completion status clearly
+    2. Points to where full deliverables are stored (team_state.principal_execution_sessions)
+    3. Provides download URL for the current epoch's report
+    
+    Design: Full report content is stored in team_state.principal_execution_sessions[epoch-1].deliverables
+    This allows Partner to reason over multiple epochs without payload duplication.
+    """
+    if not isinstance(payload, dict):
+        return f"Principal completed with result: {payload}"
+    
+    lines = ["## 🎯 Principal Research Completed"]
+    
+    # Status and epoch
+    status = payload.get("status", "completed")
+    epoch_number = payload.get("epoch_number", 1)
+    lines.append(f"\n**Status**: {status}")
+    lines.append(f"**Epoch**: {epoch_number}")
+    
+    # Summary (short executive summary from Principal)
+    summary = payload.get("summary")
+    if summary:
+        if len(summary) > 500:
+            summary = summary[:500] + "..."
+        lines.append(f"\n**Summary**: {summary}")
+    
+    # Error handling
+    error = payload.get("error")
+    if error:
+        lines.append(f"\n**Error**: {error}")
+    
+    # Report info
+    has_final_report = payload.get("has_final_report", False)
+    final_report_chars = payload.get("final_report_char_count", 0)
+    report_url = payload.get("report_url")
+    
+    if has_final_report:
+        lines.append("\n### 📄 Final Report Generated")
+        lines.append(f"- **Size**: {final_report_chars:,} characters")
+        lines.append(f"- **Epoch**: {epoch_number}")
+        
+        lines.append("\n### 🔍 How to Access Full Content")
+        lines.append("**For YOU (Partner)**: Call `GetPrincipalStatusSummaryTool` to read full content:")
+        lines.append(f"  → `detailed_report.principal_execution_sessions[{epoch_number - 1}].deliverables.final_report`")
+        lines.append("  → Or use `detailed_report.final_report.content` for current epoch")
+        
+        if report_url:
+            lines.append(f"\n**For the USER**: Share this download link (browser access):")
+            lines.append(f"  → `{report_url}`")
+        
+        lines.append("\n---")
+        lines.append("### 📢 User Communication Guidance")
+        lines.append("1. **Congratulate** the user on completing their research")
+        lines.append("2. **Summarize** the key findings (use the summary above)")
+        if report_url:
+            lines.append(f"3. **Provide** the download link for their browser: `{report_url}`")
+        lines.append("4. **Ask** if they want to discuss specific findings (you can call GetPrincipalStatusSummaryTool to read full content)")
+        lines.append(f"\n**Multi-Epoch Access**: To compare previous iterations, call `GetPrincipalStatusSummaryTool` - all {epoch_number} epoch(s) are in `detailed_report.principal_execution_sessions[]`")
+    
+    return "\n".join(lines)
+
+
 logger.info("ingestor_registry_initialized", extra={"count": len(INGESTOR_REGISTRY), "ingestors": list(INGESTOR_REGISTRY.keys())})

@@ -222,6 +222,9 @@ text_definitions:
     2. If all work modules are 'completed', it is time to generate the final report. Call the `generate_markdown_report` tool, providing a comprehensive synthesis of all module deliverables in the `principal_final_synthesis` parameter.
     3. If work is not complete, dispatch the next pending module or review a completed one.
     4. After the final report is generated and reviewed, you MUST call the `finish_flow` tool to conclude the project.
+
+    **NOTE ON DELIVERABLES STORAGE:**
+    When you complete your work and call `finish_flow`, your deliverables (including `final_report`) will be automatically stored in the session record at `team_state.principal_execution_sessions[current_epoch].deliverables`. The Partner agent can access reports from all epochs via this structure to compare versions across iterations. A download URL will also be generated and stored in the session record.
     </internal_system_directive>
   principal_replan_guidance: |-
     <system_directive>

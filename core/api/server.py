@@ -595,6 +595,36 @@ async def move_run_between_projects(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error moving run: {str(e)}")
 
+# --- Report Download Endpoint ---
+@app.get("/api/reports/{project_id}/{filename}")
+async def download_report(project_id: str, filename: str):
+    """Serve a final report file for download.
+    
+    Reports are saved when Principal completes each epoch.
+    URL format: /api/reports/{project_id}/{run_id}_epoch{N}.md
+    """
+    # Security: validate both project_id and filename to prevent path traversal
+    safe_project_id = os.path.basename(project_id)
+    if not safe_project_id or safe_project_id != project_id or '..' in project_id:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    
+    safe_filename = os.path.basename(filename)
+    if not safe_filename or safe_filename != filename or '..' in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    # Construct path to report file
+    report_path = os.path.join("projects", safe_project_id, "reports", safe_filename)
+    
+    if not os.path.isfile(report_path):
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    # Serve the file with appropriate headers for download
+    return FileResponse(
+        path=report_path,
+        filename=safe_filename,
+        media_type="text/markdown"
+    )
+
 # --- Metadata Endpoint ---
 @app.get("/metadata", response_model=MetadataResponse)
 async def get_metadata(url: str = Query(..., description="The URL for which to fetch metadata")):

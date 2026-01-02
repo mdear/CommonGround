@@ -2,6 +2,7 @@ import logging
 import asyncio
 import copy
 import json
+import os
 import uuid # Import uuid
 from typing import Dict, Any, Optional
 
@@ -460,6 +461,18 @@ class LaunchPrincipalExecutionTool(AsyncNode):
         return "default"
 
     def _principal_flow_done_callback(self, task: asyncio.Task, principal_run_id: str, run_context_ref: Optional[Dict]):
+        """
+        Callback for Principal flow completion.
+        
+        NOTE: As of the Fix 2 implementation, critical completion handling (saving report,
+        updating session, adding inbox notification) is done SYNCHRONOUSLY in flow.py's
+        _handle_principal_completion_sync() BEFORE this callback runs.
+        
+        This callback now serves as:
+        1. A fallback safety net if sync handler failed
+        2. Cleanup operations (clearing task handles, updating team_state)
+        3. Triggering view model updates
+        """
         log_prefix = f"Principal Flow Callback (Principal Run ID: {principal_run_id}, Task Name: {task.get_name()}):"
         final_task_status_for_log = "unknown_completion"
         parent_run_id_for_key = run_context_ref['meta'].get("run_id") if run_context_ref else "UNKNOWN_PARENT_RUN_ID"
@@ -478,24 +491,95 @@ class LaunchPrincipalExecutionTool(AsyncNode):
                 if partner_sub_context and partner_sub_context.get("state"):
                     partner_private_state_cb = partner_sub_context["state"]
                     
-                    # --- Inbox Migration ---
-                    inbox_item_payload = {
-                        "status": result_package.get("status"),
-                        "summary": result_package.get("final_summary"),
-                        "error": result_package.get("error_details"),
-                        "deliverables": result_package.get("deliverables")
-                    }
-                    partner_private_state_cb.setdefault("inbox", []).append({
-                        "item_id": f"inbox_{uuid.uuid4().hex[:8]}",
-                        "source": "PRINCIPAL_COMPLETED",
-                        "payload": inbox_item_payload,
-                        "consumption_policy": "consume_on_read",
-                        "metadata": {"created_at": datetime.now(timezone.utc).isoformat()}
-                    })
-                    logger.info("launch_principal_completion_inbox_added", extra={"principal_run_id": principal_run_id})
-                    # --- End Inbox Migration ---
+                    # Check if sync handler already added the inbox notification
+                    # by looking for PRINCIPAL_COMPLETED in inbox
+                    inbox = partner_private_state_cb.get("inbox", [])
+                    already_notified = any(
+                        item.get("source") == "PRINCIPAL_COMPLETED" 
+                        for item in inbox[-5:]  # Check last 5 items for efficiency
+                    )
+                    
+                    if already_notified:
+                        logger.info("launch_principal_callback_skipping_inbox", extra={
+                            "principal_run_id": principal_run_id,
+                            "reason": "sync_handler_already_added_notification"
+                        })
+                    else:
+                        # Fallback: Sync handler didn't run or failed - add notification now
+                        logger.warning("launch_principal_callback_fallback_adding_inbox", extra={
+                            "principal_run_id": principal_run_id,
+                            "reason": "sync_handler_may_have_failed"
+                        })
+                        
+                        # --- Fallback: Save final report to disk and generate download URL ---
+                        report_url = result_package.get("report_url")  # May already be set by sync handler
+                        deliverables = result_package.get("deliverables", {})
+                        final_report_content = deliverables.get("final_report") if deliverables else None
+                        
+                        sessions = run_context_ref.get("team_state", {}).get("principal_execution_sessions", [])
+                        epoch_num = len(sessions)
+                        
+                        if final_report_content and not report_url:
+                            try:
+                                project_id = run_context_ref.get("team_state", {}).get("project_id", "default")
+                                reports_dir = os.path.join("projects", project_id, "reports")
+                                os.makedirs(reports_dir, exist_ok=True)
+                                
+                                report_filename = f"{parent_run_id_for_key}_epoch{epoch_num}.md"
+                                report_path = os.path.join(reports_dir, report_filename)
+                                
+                                with open(report_path, "w", encoding="utf-8") as f:
+                                    f.write(final_report_content)
+                                
+                                # Generate full URL with base URL for user browser access
+                                # Hybrid approach: use API_BASE_URL if set (production), else construct from BACKEND_PORT (dev)
+                                api_base_url = os.environ.get("API_BASE_URL")
+                                if not api_base_url:
+                                    backend_port = os.environ.get("BACKEND_PORT", "8800")
+                                    api_base_url = f"http://localhost:{backend_port}"
+                                report_url = f"{api_base_url}/api/reports/{project_id}/{report_filename}"
+                                logger.info("principal_report_saved_fallback", extra={
+                                    "report_path": report_path,
+                                    "report_url": report_url,
+                                    "epoch_num": epoch_num,
+                                    "char_count": len(final_report_content)
+                                })
+                            except Exception as e_save:
+                                logger.error("principal_report_save_failed_fallback", extra={"error": str(e_save)}, exc_info=True)
+                        
+                        # Update session record if not already done
+                        if sessions and epoch_num > 0:
+                            current_session = sessions[epoch_num - 1]
+                            if not current_session.get("deliverables"):
+                                current_session["deliverables"] = deliverables
+                                current_session["report_url"] = report_url
+                                current_session["epoch_number"] = epoch_num
+                                logger.info("principal_session_deliverables_stored_fallback", extra={
+                                    "epoch_num": epoch_num,
+                                    "has_final_report": bool(final_report_content),
+                                    "report_url": report_url
+                                })
+                        
+                        # Add inbox notification
+                        inbox_item_payload = {
+                            "status": result_package.get("status"),
+                            "summary": result_package.get("final_summary"),
+                            "error": result_package.get("error_details"),
+                            "epoch_number": epoch_num,
+                            "report_url": report_url,
+                            "has_final_report": bool(final_report_content),
+                            "final_report_char_count": len(final_report_content) if final_report_content else 0,
+                        }
+                        partner_private_state_cb.setdefault("inbox", []).append({
+                            "item_id": f"inbox_{uuid.uuid4().hex[:8]}",
+                            "source": "PRINCIPAL_COMPLETED",
+                            "payload": inbox_item_payload,
+                            "consumption_policy": "consume_on_read",
+                            "metadata": {"created_at": datetime.now(timezone.utc).isoformat()}
+                        })
+                        logger.info("launch_principal_completion_inbox_added_fallback", extra={"principal_run_id": principal_run_id})
 
-                    # Set the event to wake up the Partner agent
+                    # Set the event to wake up the Partner agent (may already be set)
                     completion_event = run_context_ref['runtime'].get("principal_completion_event")
                     if completion_event and not completion_event.is_set():
                         completion_event.set()

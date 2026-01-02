@@ -343,6 +343,179 @@ class TestBackwardsCompatibility:
         assert original["team_state"] == paginated["team_state"]
 
 
+class TestTeamStatePagination:
+    """Tests for team_state section pagination with work module archives."""
+    
+    @pytest.fixture
+    def run_context_with_archives(self):
+        """Create a run context with work modules that have context_archive."""
+        return {
+            "meta": {"run_id": "test-run", "status": "completed"},
+            "team_state": {
+                "work_modules": {
+                    "WM_1": {
+                        "id": "WM_1",
+                        "name": "Research Task",
+                        "status": "completed",
+                        "context_archive": [
+                            {
+                                "model": "claude-sonnet-4",
+                                "messages": [{"role": "user", "content": f"Msg {i}"} for i in range(50)],
+                                "deliverables": {"primary_summary": "Summary 1"}
+                            },
+                            {
+                                "model": "claude-sonnet-4",
+                                "messages": [{"role": "assistant", "content": f"Response {i}"} for i in range(30)],
+                                "deliverables": {"primary_summary": "Summary 2"}
+                            }
+                        ]
+                    },
+                    "WM_2": {
+                        "id": "WM_2",
+                        "name": "Analysis Task",
+                        "status": "in_progress",
+                        "context_archive": []
+                    },
+                    "WM_3": {
+                        "id": "WM_3",
+                        "name": "Writing Task",
+                        "status": "pending",
+                        # No context_archive at all
+                    }
+                },
+                "dispatch_history": []
+            },
+            "sub_context_refs": {},
+            "runtime": {}
+        }
+    
+    def test_team_state_lightweight_excludes_context_archive(self, run_context_with_archives):
+        """team_state without work_module_id should exclude context_archive."""
+        result = get_paginated_run_snapshot(
+            run_context_with_archives,
+            mode="section",
+            section="team_state"
+        )
+        
+        assert result["mode"] == "section"
+        assert result["section"] == "team_state"
+        assert "work_modules" in result["data"]
+        
+        # Work modules should NOT have context_archive
+        for wm_id, wm in result["data"]["work_modules"].items():
+            assert "context_archive" not in wm
+    
+    def test_team_state_includes_work_module_summaries(self, run_context_with_archives):
+        """Lightweight team_state should include archive summaries."""
+        result = get_paginated_run_snapshot(
+            run_context_with_archives,
+            mode="section",
+            section="team_state"
+        )
+        
+        assert "work_module_summaries" in result
+        summaries = result["work_module_summaries"]
+        
+        # WM_1 has 2 archives
+        assert summaries["WM_1"]["archive_count"] == 2
+        assert len(summaries["WM_1"]["archives"]) == 2
+        assert summaries["WM_1"]["archives"][0]["message_count"] == 50
+        assert summaries["WM_1"]["archives"][1]["message_count"] == 30
+        
+        # WM_2 has empty archive
+        assert summaries["WM_2"]["archive_count"] == 0
+        
+        # WM_3 has no context_archive key
+        assert summaries["WM_3"]["archive_count"] == 0
+    
+    def test_team_state_with_work_module_id_returns_full_module(self, run_context_with_archives):
+        """team_state with work_module_id should return that module with context_archive."""
+        result = get_paginated_run_snapshot(
+            run_context_with_archives,
+            mode="section",
+            section="team_state",
+            work_module_id="WM_1"
+        )
+        
+        assert result["mode"] == "section"
+        assert result["section"] == "team_state"
+        assert result["work_module_id"] == "WM_1"
+        assert "data" in result
+        assert "context_archive" in result["data"]
+        assert len(result["data"]["context_archive"]) == 2
+    
+    def test_team_state_invalid_work_module_id(self, run_context_with_archives):
+        """Invalid work_module_id should return error with available modules."""
+        result = get_paginated_run_snapshot(
+            run_context_with_archives,
+            mode="section",
+            section="team_state",
+            work_module_id="WM_999"
+        )
+        
+        assert "error" in result
+        assert "not found" in result["error"]
+        assert "available_modules" in result
+        assert "WM_1" in result["available_modules"]
+    
+    def test_team_state_archive_pagination(self, run_context_with_archives):
+        """archive_index should paginate messages within specific archive."""
+        result = get_paginated_run_snapshot(
+            run_context_with_archives,
+            mode="section",
+            section="team_state",
+            work_module_id="WM_1",
+            archive_index=0,
+            message_offset=0,
+            message_limit=20
+        )
+        
+        assert result["work_module_id"] == "WM_1"
+        assert result["archive_index"] == 0
+        assert "pagination" in result
+        
+        pagination = result["pagination"]
+        assert pagination["total_messages"] == 50
+        assert pagination["returned"] == 20
+        assert pagination["has_more"] == True
+        
+        # Should have paginated messages
+        assert len(result["data"]["messages"]) == 20
+        # Should still have deliverables
+        assert "deliverables" in result["data"]
+    
+    def test_team_state_archive_pagination_last_page(self, run_context_with_archives):
+        """Last page of archive messages should have has_more=False."""
+        result = get_paginated_run_snapshot(
+            run_context_with_archives,
+            mode="section",
+            section="team_state",
+            work_module_id="WM_1",
+            archive_index=0,
+            message_offset=40,
+            message_limit=20
+        )
+        
+        pagination = result["pagination"]
+        assert pagination["offset"] == 40
+        assert pagination["returned"] == 10  # Only 10 remaining
+        assert pagination["has_more"] == False
+    
+    def test_team_state_invalid_archive_index(self, run_context_with_archives):
+        """Invalid archive_index should return error."""
+        result = get_paginated_run_snapshot(
+            run_context_with_archives,
+            mode="section",
+            section="team_state",
+            work_module_id="WM_1",
+            archive_index=999
+        )
+        
+        assert "error" in result
+        assert "out of range" in result["error"]
+        assert result["archive_count"] == 2
+
+
 class TestReconstructedDataCompatibility:
     """
     Tests verifying that reconstructed live data is compatible with 

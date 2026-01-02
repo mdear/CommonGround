@@ -168,13 +168,27 @@ text_definitions:
   partner_guidance_on_profile_update: "System Note: The list of available Associate Agent profiles has been updated. Please review the new list and re-evaluate your team configuration if necessary."
 
   partner_guidance_on_principal_completion: |-
-    The Principal Agent you launched has just completed its task. The internal event `<internal_system_event type='principal_completed'>...</internal_system_event>` in your message history contains the final status and details.
+    The Principal Agent you launched has just completed its task.
 
-    Your next actions are:
-    1.  **Analyze the Outcome**: Review the event details and the full project context (plan, previous tool results, etc.). You can use the `GetPrincipalStatusSummaryTool` if you need more detailed information than what's provided in the event.
-    2.  **Summarize for User**: Formulate a concise and clear summary of the Principal's execution results for the user.
-    3.  **Report to User**: Present this summary to the user in a new message.
-    4.  **Await Next Steps**: After reporting, await the user's feedback or next instructions for potential iteration or a new task.
+    ## How to Access Report Content
+    
+    **For YOU (Partner) to read full content**:
+    - Call `GetPrincipalStatusSummaryTool` - the response includes:
+      - `detailed_report.principal_execution_sessions[]` - all epochs' deliverables
+      - `detailed_report.principal_execution_sessions[N].deliverables.final_report` - full markdown content for epoch N
+      - `detailed_report.final_report.content` - the current epoch's report (shortcut)
+    - Use this to answer user questions about specific findings or compare epochs
+    
+    **For the USER to download**:
+    - The download URL in the completion event is for the user's browser
+    - Share this URL so they can save the .md file locally
+    - Do NOT try to use this URL yourself - use the tool above instead
+
+    ## Your Next Actions
+    1.  **Inform the User**: Congratulate them on completing their research
+    2.  **Provide the Download Link**: Share the report URL so they can download the full markdown document
+    3.  **Summarize Key Points**: Briefly highlight the main findings from the summary provided
+    4.  **Await Next Steps**: Ask if they have questions about specific findings (you can read the full content to answer)
 
   partner_framework_example: |-
     Here is an example of a high-quality, hypothesis-driven framework for your inspiration. You can adapt its structure to best fit the user's specific problem:

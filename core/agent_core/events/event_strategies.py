@@ -24,7 +24,8 @@ from .ingestors import (
     tagged_content_ingestor,
     observer_failure_ingestor,
     user_prompt_ingestor,
-    protocol_aware_ingestor
+    protocol_aware_ingestor,
+    principal_completed_ingestor
 )
 
 EVENT_STRATEGY_REGISTRY: Dict[str, EventHandlingStrategy] = {
@@ -59,7 +60,7 @@ EVENT_STRATEGY_REGISTRY: Dict[str, EventHandlingStrategy] = {
         }
     ),
     "PRINCIPAL_COMPLETED": EventHandlingStrategy(
-        ingestor_func=generic_message_ingestor,
+        ingestor_func=principal_completed_ingestor,
         default_injection_mode="append_as_new_message",
         default_params={"role": "user", "is_persistent_in_memory": True}
     ),

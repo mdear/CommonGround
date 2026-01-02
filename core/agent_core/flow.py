@@ -18,6 +18,129 @@ logger = logging.getLogger(__name__)
 class ProjectFlow(AsyncFlow):
     """Project-specific flow class that extends AsyncFlow and adds custom preparation logic"""
 
+
+def _handle_principal_completion_sync(
+    result_package: dict,
+    principal_context: dict,
+    run_id: str
+) -> dict:
+    """
+    Handle Principal completion synchronously BEFORE returning.
+    
+    This runs in the flow's try block, ensuring:
+    1. Report is saved to disk
+    2. Session record is updated with deliverables
+    3. Partner inbox notification is added
+    
+    All of this happens BEFORE completion_event.set(), guaranteeing
+    Partner has access to deliverables when it wakes up.
+    
+    Returns:
+        Updated result_package with report_url added
+    """
+    try:
+        run_context = principal_context['refs']['run']
+        team_state = principal_context['refs']['team']
+        partner_sub_context = run_context.get('sub_context_refs', {}).get("_partner_context_ref")
+        
+        if not partner_sub_context or not partner_sub_context.get("state"):
+            logger.error("principal_completion_handler_no_partner_context", extra={"run_id": run_id})
+            return result_package
+        
+        partner_state = partner_sub_context["state"]
+        
+        # Extract deliverables
+        deliverables = result_package.get("deliverables", {}) or {}
+        final_report_content = deliverables.get("final_report")
+        
+        # Get epoch number from sessions
+        sessions = team_state.get("principal_execution_sessions", [])
+        epoch_num = len(sessions)
+        
+        # --- Save final report to disk and generate download URL ---
+        report_url = None
+        if final_report_content:
+            try:
+                project_id = team_state.get("project_id", "default")
+                
+                # Create reports directory under project
+                reports_dir = os.path.join("projects", project_id, "reports")
+                os.makedirs(reports_dir, exist_ok=True)
+                
+                # Generate filename: {run_id}_epoch{N}.md
+                report_filename = f"{run_id}_epoch{epoch_num}.md"
+                report_path = os.path.join(reports_dir, report_filename)
+                
+                # Save report to disk
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write(final_report_content)
+                
+                # Generate download URL with base URL for user browser access
+                # Hybrid approach: use API_BASE_URL if set (production), else construct from BACKEND_PORT (dev)
+                api_base_url = os.environ.get("API_BASE_URL")
+                if not api_base_url:
+                    backend_port = os.environ.get("BACKEND_PORT", "8800")
+                    api_base_url = f"http://localhost:{backend_port}"
+                report_url = f"{api_base_url}/api/reports/{project_id}/{report_filename}"
+                logger.info("principal_report_saved_sync", extra={
+                    "report_path": report_path,
+                    "report_url": report_url,
+                    "epoch_num": epoch_num,
+                    "char_count": len(final_report_content)
+                })
+            except Exception as e_save:
+                logger.error("principal_report_save_failed_sync", extra={"error": str(e_save)}, exc_info=True)
+        
+        # --- Store deliverables in session record (single source of truth) ---
+        if sessions and epoch_num > 0:
+            current_session = sessions[epoch_num - 1]  # 0-indexed access
+            current_session["deliverables"] = deliverables
+            current_session["report_url"] = report_url
+            current_session["epoch_number"] = epoch_num
+            logger.info("principal_session_deliverables_stored_sync", extra={
+                "epoch_num": epoch_num,
+                "has_final_report": bool(final_report_content),
+                "report_url": report_url
+            })
+        
+        # --- Add Partner inbox notification with navigable link ---
+        inbox_item_payload = {
+            "status": result_package.get("status"),
+            "summary": result_package.get("final_summary"),
+            "error": result_package.get("error_details"),
+            "epoch_number": epoch_num,
+            "report_url": report_url,  # <-- Navigable link for user
+            "has_final_report": bool(final_report_content),
+            "final_report_char_count": len(final_report_content) if final_report_content else 0,
+        }
+        
+        partner_state.setdefault("inbox", []).append({
+            "item_id": f"inbox_{uuid.uuid4().hex[:8]}",
+            "source": "PRINCIPAL_COMPLETED",
+            "payload": inbox_item_payload,
+            "consumption_policy": "consume_on_read",
+            "metadata": {"created_at": datetime.now(timezone.utc).isoformat()}
+        })
+        
+        logger.info("principal_completion_inbox_added_sync", extra={
+            "run_id": run_id,
+            "epoch_num": epoch_num,
+            "report_url": report_url,
+            "has_deliverables": bool(deliverables)
+        })
+        
+        # Add report_url to result_package for downstream use
+        result_package["report_url"] = report_url
+        
+        return result_package
+        
+    except Exception as e:
+        logger.error("principal_completion_handler_error", extra={
+            "run_id": run_id,
+            "error": str(e)
+        }, exc_info=True)
+        return result_package
+
 async def run_principal_async(principal_context: dict):
     """Asynchronously run the Principal flow of the agent"""
     logger = logging.getLogger(__name__)
@@ -83,7 +206,16 @@ async def run_principal_async(principal_context: dict):
             
         final_state = principal_context["state"]
         if "final_result_package" in final_state:
-            return final_state["final_result_package"]
+            result_package = final_state["final_result_package"]
+            # CRITICAL: Handle completion synchronously BEFORE returning
+            # This ensures deliverables are propagated to Partner inbox
+            # and report is saved BEFORE completion_event.set() wakes Partner
+            result_package = _handle_principal_completion_sync(
+                result_package=result_package,
+                principal_context=principal_context,
+                run_id=current_run_id
+            )
+            return result_package
         else:
             return {
                 "status": "COMPLETED_WITH_ERROR",

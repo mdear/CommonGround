@@ -1026,6 +1026,15 @@ class AgentNode(AsyncNode):
                 turn_manager.update_llm_interaction_end(context, llm_response)
 
             self._process_tool_calls(llm_response, context)
+            
+            # ===============================================================
+            # TOOL CONFLICT RESOLUTION: Prioritize flow-terminating tools
+            # If agent calls finish_flow/generate_message_summary with other
+            # tools, keep only the terminating tool to prevent critical drops
+            # ===============================================================
+            if isinstance(llm_response.get("tool_calls"), list) and len(llm_response["tool_calls"]) > 1:
+                llm_response["tool_calls"] = self._resolve_tool_conflicts(llm_response["tool_calls"])
+            
             if isinstance(llm_response.get("tool_calls"), list) and len(llm_response["tool_calls"]) > 1:
                 logger.warning("multiple_tool_calls_detected", extra={"agent_id": self.agent_id, "total_calls": len(llm_response['tool_calls']), "dropped_calls": llm_response['tool_calls'][1:]})
                 llm_response["tool_calls"] = llm_response["tool_calls"][:1]  # Keep only the first call
@@ -1201,6 +1210,53 @@ class AgentNode(AsyncNode):
 
         logger.debug("message_hydration_complete", extra={"message_count": len(hydrated_messages)})
         return hydrated_messages
+
+    # Flow-terminating tools that should take priority when called with other tools
+    FLOW_TERMINATING_TOOLS = {"finish_flow", "generate_message_summary"}
+    
+    def _resolve_tool_conflicts(self, tool_calls: List[Dict]) -> List[Dict]:
+        """
+        Resolve conflicting tool calls when agent calls multiple tools simultaneously.
+        
+        Critical: If a flow-terminating tool (finish_flow, generate_message_summary) is
+        called alongside other tools, the terminating tool takes priority. This prevents
+        silent data loss where finish_flow gets dropped because it's not the first tool.
+        
+        Args:
+            tool_calls: List of tool call dictionaries from LLM response
+            
+        Returns:
+            Resolved list - either original if no conflict, or just the terminating tool
+        """
+        if len(tool_calls) <= 1:
+            return tool_calls
+        
+        # Extract tool names
+        tool_names = [tc.get("function", {}).get("name") for tc in tool_calls]
+        
+        # Check for flow-terminating tools
+        terminating_tools_found = [
+            (i, name) for i, name in enumerate(tool_names) 
+            if name in self.FLOW_TERMINATING_TOOLS
+        ]
+        
+        if terminating_tools_found:
+            # Flow-terminating tool called with other tools - prioritize it
+            priority_index, priority_tool = terminating_tools_found[0]  # Take first terminating tool
+            dropped_tools = [name for i, name in enumerate(tool_names) if i != priority_index]
+            
+            logger.warning("tool_conflict_resolved_terminating_priority", extra={
+                "agent_id": self.agent_id,
+                "original_tools": tool_names,
+                "kept_tool": priority_tool,
+                "dropped_tools": dropped_tools,
+                "reason": "flow_terminating_tool_takes_priority"
+            })
+            
+            return [tool_calls[priority_index]]
+        
+        # No terminating tool - return original (standard first-only will apply later)
+        return tool_calls
 
     def _clean_messages_for_llm(self, messages: List[Dict]) -> List[Dict]:
         """Cleans messages, removes internal fields, and ensures all content is LLM-processable text."""

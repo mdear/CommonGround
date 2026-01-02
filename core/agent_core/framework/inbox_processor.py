@@ -292,6 +292,16 @@ class InboxProcessor:
                 if source == "AGENT_STARTUP_BRIEFING":
                     self.state.setdefault("flags", {})["initial_briefing_delivered"] = True
                     logger.info("startup_briefing_processed", extra={"agent_id": self.agent_id, "initial_briefing_delivered": True})
+                
+                # Log PRINCIPAL_COMPLETED processing (the report_url is now included in the payload)
+                if source == "PRINCIPAL_COMPLETED":
+                    deliverables = payload.get("deliverables", {}) if isinstance(payload, dict) else {}
+                    report_url = payload.get("report_url") if isinstance(payload, dict) else None
+                    logger.info("principal_completed_processed", extra={
+                        "agent_id": self.agent_id, 
+                        "has_final_report": bool(deliverables.get("final_report")),
+                        "report_url": report_url
+                    })
 
                 if is_persistent:
                     self.state.setdefault("messages", []).append(new_message)

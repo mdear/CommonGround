@@ -1,11 +1,15 @@
 import dotenv
 import logging
 import argparse
+import os
 import uvicorn
 # Import the new logging configuration function
 from agent_core.config.logging_config import setup_global_logging
 
-# Remove the old setup_logging function definition
+# Load environment variables early to get default port
+dotenv.load_dotenv(".env", override=True)
+DEFAULT_PORT = int(os.environ.get("BACKEND_PORT", "8800"))
+DEFAULT_HOST = os.environ.get("API_HOST", "127.0.0.1")
 
 def parse_args():
     """Parse command-line arguments"""
@@ -14,15 +18,15 @@ def parse_args():
     parser.add_argument(
         '--host',
         type=str,
-        default="127.0.0.1",
-        help='Server host address (default: 127.0.0.1)'
+        default=DEFAULT_HOST,
+        help=f'Server host address (default: {DEFAULT_HOST}, from .env API_HOST)'
     )
     
     parser.add_argument(
         '--port',
         type=int,
-        default=8000,
-        help='Server port (default: 8000)'
+        default=DEFAULT_PORT,
+        help=f'Server port (default: {DEFAULT_PORT}, from .env BACKEND_PORT)'
     )
     
     parser.add_argument(
@@ -52,11 +56,11 @@ def main():
     """Main function"""
     args = parse_args()
 
-    # Load environment variables
-    dotenv.load_dotenv(".env", override=True, verbose=True) # Add verbose=True
+    # .env already loaded at module level for defaults
+    # Reload to ensure latest values
+    dotenv.load_dotenv(".env", override=True, verbose=True)
     
     # Set log file in environment so lifespan manager can access it
-    import os
     if args.log_file:
         os.environ["LOG_FILE"] = args.log_file
 

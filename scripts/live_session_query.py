@@ -25,9 +25,10 @@ Usage:
 
 Examples:
     python live_session_query.py burrowing-cream-fulmar
-    python live_session_query.py burrowing-cream-fulmar --server ws://localhost:8800
     python live_session_query.py burrowing-cream-fulmar --mode section --section team_state
     python live_session_query.py burrowing-cream-fulmar --reconstruct --output live_snapshot.json
+
+Note: Default port is read from core/.env (BACKEND_PORT setting)
 
 Requirements:
     pip install websockets aiohttp
@@ -36,15 +37,40 @@ Requirements:
 import argparse
 import asyncio
 import json
+import os
+import re
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
+
+
+def get_port_from_env(var_name: str, default: int) -> int:
+    """Read a port from core/.env file (single source of truth)."""
+    script_dir = Path(__file__).parent
+    env_file = script_dir.parent / "core" / ".env"
+    
+    if env_file.exists():
+        try:
+            content = env_file.read_text()
+            match = re.search(rf'^{var_name}=(\d+)', content, re.MULTILINE)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
+    
+    return default
+
+
+DEFAULT_BACKEND_PORT = get_port_from_env("BACKEND_PORT", 8800)
 
 
 class LiveSessionClient:
     """WebSocket client for querying live session state with pagination support."""
     
-    def __init__(self, server_url: str = "ws://127.0.0.1:8000"):
+    def __init__(self, server_url: str = None):
+        if server_url is None:
+            server_url = f"ws://127.0.0.1:{DEFAULT_BACKEND_PORT}"
         self.server_url = server_url
         self.http_url = server_url.replace("ws://", "http://").replace("wss://", "https://")
         self.session_id = None
@@ -67,7 +93,7 @@ class LiveSessionClient:
         
         ws_url = f"{self.server_url}/ws/{self.session_id}"
         print(f"Connecting to WebSocket: {ws_url}")
-        self.ws = await websockets.connect(ws_url, max_size=10 * 1024 * 1024)
+        self.ws = await websockets.connect(ws_url, max_size=20 * 1024 * 1024)  # 20MB limit
         return self
     
     async def close(self):
@@ -81,6 +107,8 @@ class LiveSessionClient:
         mode: str = "summary",
         section: Optional[str] = None,
         context_name: Optional[str] = None,
+        work_module_id: Optional[str] = None,
+        archive_index: Optional[int] = None,
         message_offset: int = 0,
         message_limit: int = 50
     ) -> Dict[str, Any]:
@@ -93,6 +121,10 @@ class LiveSessionClient:
             request_data["section"] = section
         if context_name:
             request_data["context_name"] = context_name
+        if work_module_id:
+            request_data["work_module_id"] = work_module_id
+        if archive_index is not None:
+            request_data["archive_index"] = archive_index
         request_data["message_offset"] = message_offset
         request_data["message_limit"] = message_limit
         
@@ -115,7 +147,11 @@ class LiveSessionClient:
     
     async def reconstruct_full_state(self, run_id: str, message_page_size: int = 100) -> Dict[str, Any]:
         """
-        Reconstruct complete session state by pulling all sections and paginating messages.
+        Reconstruct complete session state by pulling all sections with pagination.
+        
+        This method fetches data in small chunks to avoid WebSocket message size limits.
+        For large sessions (many work modules with context_archive), it fetches each
+        work module's archives separately with message pagination.
         
         Returns a structure compatible with the persisted JSON format for use with analyze_session.py.
         """
@@ -123,30 +159,90 @@ class LiveSessionClient:
         print("=" * 60)
         
         # Step 1: Get summary to understand the structure
-        print("  [1/4] Fetching summary...")
+        print("  [1/6] Fetching summary...")
         summary = await self.request_context(run_id, mode="summary")
         
         # Step 2: Get meta section
-        print("  [2/4] Fetching metadata...")
+        print("  [2/6] Fetching metadata...")
         meta_response = await self.request_context(run_id, mode="section", section="meta")
         meta = meta_response.get("data", {})
         
-        # Step 3: Get team_state section
-        print("  [3/4] Fetching team state...")
+        # Step 3: Get team_state WITHOUT context_archive (lightweight)
+        print("  [3/6] Fetching team state (lightweight)...")
         team_response = await self.request_context(run_id, mode="section", section="team_state")
         team_state = team_response.get("data", {})
+        work_module_summaries = team_response.get("work_module_summaries", {})
         
-        # Step 4: Get all sub_contexts with full message pagination
-        print("  [4/4] Fetching agent contexts with messages...")
+        # Step 4: Fetch context_archive for each work module that has archives
+        print("  [4/6] Fetching work module archives...")
+        work_modules = team_state.get("work_modules", {})
+        
+        for wm_id, wm_summary in work_module_summaries.items():
+            archive_count = wm_summary.get("archive_count", 0)
+            if archive_count == 0:
+                continue
+            
+            print(f"       {wm_id}: {archive_count} archive(s)")
+            
+            # Initialize context_archive in the work module
+            if wm_id in work_modules:
+                work_modules[wm_id]["context_archive"] = []
+            
+            # Fetch each archive with message pagination
+            for archive_summary in wm_summary.get("archives", []):
+                arch_idx = archive_summary.get("archive_index", 0)
+                total_messages = archive_summary.get("message_count", 0)
+                
+                # Fetch archive messages in pages
+                all_messages = []
+                offset = 0
+                archive_data = {}
+                
+                while True:
+                    arch_response = await self.request_context(
+                        run_id,
+                        mode="section",
+                        section="team_state",
+                        work_module_id=wm_id,
+                        archive_index=arch_idx,
+                        message_offset=offset,
+                        message_limit=message_page_size
+                    )
+                    
+                    data = arch_response.get("data", {})
+                    messages = data.get("messages", [])
+                    all_messages.extend(messages)
+                    
+                    # Capture non-message fields from first response
+                    if not archive_data:
+                        archive_data = {k: v for k, v in data.items() if k != "messages"}
+                    
+                    pagination = arch_response.get("pagination", {})
+                    returned = pagination.get("returned", 0)
+                    offset += returned
+                    
+                    if not pagination.get("has_more", False) or returned == 0:
+                        break
+                
+                # Build complete archive
+                archive_data["messages"] = all_messages
+                work_modules[wm_id]["context_archive"].append(archive_data)
+                
+                if total_messages > message_page_size:
+                    print(f"         archive[{arch_idx}]: {len(all_messages)}/{total_messages} messages")
+        
+        # Step 5: Get all sub_contexts with full message pagination
+        print("  [5/6] Fetching agent contexts with messages...")
         sub_contexts_summary = summary.get("sub_contexts_summary", {})
         sub_contexts_state = {}
         
         for ctx_name, ctx_summary in sub_contexts_summary.items():
             total_messages = ctx_summary.get("message_count", 0)
-            print(f"       Fetching {ctx_name}: {total_messages} messages")
+            print(f"       {ctx_name}: {total_messages} messages")
             
             all_messages = []
             offset = 0
+            data = {}
             
             while offset < total_messages:
                 ctx_response = await self.request_context(
@@ -168,19 +264,16 @@ class LiveSessionClient:
                 
                 if not pagination.get("has_more", False) or returned == 0:
                     break
-                
-                print(f"         ... fetched {len(all_messages)}/{total_messages} messages")
             
             # Build the full context state
-            # Get inbox and deliverables from the last page response
             sub_contexts_state[ctx_name] = {
                 "messages": all_messages,
                 "inbox": data.get("inbox", []),
                 "deliverables": data.get("deliverables", {})
             }
         
-        # Step 5: Get knowledge_base
-        print("  [5/5] Fetching knowledge base...")
+        # Step 6: Get knowledge_base
+        print("  [6/6] Fetching knowledge base...")
         try:
             kb_response = await self.request_context(run_id, mode="section", section="knowledge_base")
             knowledge_base = kb_response.get("data")
@@ -203,10 +296,12 @@ class LiveSessionClient:
         
         print(f"\nReconstruction complete!")
         print(f"  - Meta: {'present' if meta else 'empty'}")
-        print(f"  - Team state: {len(team_state.get('work_modules', {}))} work modules")
+        print(f"  - Team state: {len(work_modules)} work modules")
+        total_archives = sum(len(wm.get("context_archive", [])) for wm in work_modules.values())
+        print(f"  - Total archives: {total_archives}")
         print(f"  - Sub contexts: {len(sub_contexts_state)} contexts")
         total_msgs = sum(len(ctx.get("messages", [])) for ctx in sub_contexts_state.values())
-        print(f"  - Total messages: {total_msgs}")
+        print(f"  - Total messages in sub_contexts: {total_msgs}")
         
         return reconstructed
 
@@ -587,7 +682,7 @@ Sections (for --mode section):
 
 Examples:
     # Quick summary (default)
-    python live_session_query.py burrowing-cream-fulmar --server ws://localhost:8800
+    python live_session_query.py burrowing-cream-fulmar
     
     # Get team state only
     python live_session_query.py <run_id> --mode section --section team_state
@@ -610,8 +705,8 @@ won't be found even if it was persisted to JSON.
         """
     )
     parser.add_argument("run_id", help="The run ID to query")
-    parser.add_argument("--server", default="ws://127.0.0.1:8000", 
-                       help="WebSocket server URL (default: ws://127.0.0.1:8000)")
+    parser.add_argument("--server", default=f"ws://127.0.0.1:{DEFAULT_BACKEND_PORT}", 
+                       help=f"WebSocket server URL (default: ws://127.0.0.1:{DEFAULT_BACKEND_PORT})")
     parser.add_argument("--mode", choices=["summary", "full", "section"], default="summary",
                        help="Query mode: summary (default), full, or section")
     parser.add_argument("--section", choices=["meta", "team_state", "sub_contexts", "knowledge_base"],

@@ -634,6 +634,8 @@ async def handle_request_run_context_message(ws_state: Dict, data: Dict):
             "mode": "summary"|"full"|"section", # Optional, default "summary"
             "section": "meta"|"team_state"|"sub_contexts"|"knowledge_base",  # For mode="section"
             "context_name": "_principal_context_ref",  # For sub_contexts section
+            "work_module_id": "WM_1",           # For team_state section (optional)
+            "archive_index": 0,                 # For team_state work module archives (optional)
             "message_offset": 0,                # Pagination offset
             "message_limit": 50                 # Pagination limit
         }
@@ -643,6 +645,11 @@ async def handle_request_run_context_message(ws_state: Dict, data: Dict):
         - "summary": Lightweight overview (default) - always small response
         - "full": Complete snapshot (may exceed WebSocket limits for large sessions)
         - "section": Specific section with pagination
+    
+    For team_state section:
+        - Without work_module_id: Returns team_state with work modules stripped of context_archive
+        - With work_module_id: Returns that work module with full context_archive
+        - With archive_index: Paginates messages within that specific archive
     """
     event_manager = ws_state.event_manager # Changed: Using HEAD's way
     session_id_for_log = event_manager.session_id
@@ -651,6 +658,8 @@ async def handle_request_run_context_message(ws_state: Dict, data: Dict):
     mode = data.get("mode", "summary")  # Default to summary for safety
     section = data.get("section")
     context_name = data.get("context_name")
+    work_module_id = data.get("work_module_id")
+    archive_index = data.get("archive_index")
     message_offset = data.get("message_offset", 0)
     message_limit = data.get("message_limit", 50)
     
@@ -701,8 +710,10 @@ async def handle_request_run_context_message(ws_state: Dict, data: Dict):
             mode=mode,
             section=section,
             context_name=context_name,
+            work_module_id=work_module_id,
             message_offset=message_offset,
-            message_limit=message_limit
+            message_limit=message_limit,
+            archive_index=archive_index
         )
         
         logger.debug("run_context_snapshot_completed", extra={"session_id": session_id_for_log, "run_id": run_id})

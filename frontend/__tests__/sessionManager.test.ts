@@ -256,7 +256,7 @@ describe('SessionManager', () => {
       expect((ws as any).send).toHaveBeenCalled();
       const sentMessage = JSON.parse((ws as any).send.mock.calls[0][0]);
       expect(sentMessage.type).toBe('heartbeat');
-      expect(sentMessage.sessionId).toBe('test-session');
+      expect(sentMessage.data.sessionId).toBe('test-session');
     });
 
     test('stopHeartbeat clears interval', () => {
@@ -354,8 +354,10 @@ describe('SessionManager', () => {
       const sentMessage = JSON.parse((ws as any).send.mock.calls[0][0]);
       expect(sentMessage).toEqual({
         type: 'reconnect',
-        run_id: 'run-123',
-        last_event_id: 42,
+        data: {
+          run_id: 'run-123',
+          last_event_id: 42,
+        },
       });
     });
   });

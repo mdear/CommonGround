@@ -242,6 +242,21 @@ class GetPrincipalStatusSummaryTool(AsyncNode):
             work_modules_summary_parts.append("  No work modules available or format is incorrect.")
         work_modules_summary_text = "\n".join(work_modules_summary_parts)
 
+        # 5b. Build epoch history summary
+        principal_execution_sessions = team_state_global.get("principal_execution_sessions", [])
+        epoch_history_parts = []
+        if principal_execution_sessions:
+            epoch_history_parts.append(f"Principal Execution History ({len(principal_execution_sessions)} epoch(s)):")
+            for idx, session in enumerate(principal_execution_sessions):
+                epoch_num = session.get("epoch_number", idx + 1)
+                status = session.get("status", "unknown")
+                has_deliverables = "deliverables" in session
+                report_url = session.get("report_url", "N/A")
+                epoch_history_parts.append(
+                    f"  - Epoch {epoch_num}: Status={status}, HasDeliverables={has_deliverables}, ReportURL={report_url}"
+                )
+        epoch_history_text = "\n".join(epoch_history_parts) if epoch_history_parts else ""
+
         # 6. Build comprehensive status summary
         status_parts = []
 
@@ -259,6 +274,10 @@ class GetPrincipalStatusSummaryTool(AsyncNode):
         # Add non-critical staleness warning after status if not orphaned
         if staleness_warning and not is_session_orphaned:
             status_parts.append(staleness_warning)
+
+        # Add epoch history before work modules
+        if epoch_history_text:
+            status_parts.append(epoch_history_text)
 
         status_parts.extend([
             work_modules_summary_text,
@@ -290,6 +309,9 @@ class GetPrincipalStatusSummaryTool(AsyncNode):
                         break
 
         # 8. Prepare detailed_report (with staleness info and final report)
+        # Include principal_execution_sessions for epoch-based report access
+        principal_execution_sessions = team_state_global.get("principal_execution_sessions", [])
+
         detailed_report = {
             "task_handle_status_raw": str(principal_task_handle),
             "principal_task_handle_status_text": principal_task_handle_status_text,
@@ -301,6 +323,10 @@ class GetPrincipalStatusSummaryTool(AsyncNode):
             "full_message_history_raw": principal_messages,
             # Final report extraction (when Principal is complete)
             "final_report": final_report,
+            # Epoch-based session history with deliverables
+            # Partner can access all epochs' reports via: detailed_report.principal_execution_sessions[N].deliverables
+            "principal_execution_sessions": principal_execution_sessions,
+            "total_epochs": len(principal_execution_sessions),
             # Staleness detection fields
             "staleness_detection": {
                 "is_session_orphaned": is_session_orphaned,

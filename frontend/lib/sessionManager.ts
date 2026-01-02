@@ -79,9 +79,9 @@ export class SessionManager {
   private websocket: WebSocket | null = null;
 
   private heartbeatConfig: HeartbeatConfig = {
-    intervalMs: 20000, // 20 seconds (matches backend CLIENT_HEARTBEAT_INTERVAL_SECONDS)
-    timeoutMs: 10000, // 10 seconds
-    maxMissed: 2,
+    intervalMs: 30000, // 30 seconds between heartbeats (increased for busy systems)
+    timeoutMs: 20000, // 20 seconds grace period (increased for busy systems)
+    maxMissed: 4, // Allow 4 missed before reconnect (more tolerant)
   };
 
   private onSessionExpired?: () => void;
@@ -358,9 +358,11 @@ export class SessionManager {
 
     const heartbeat = {
       type: 'heartbeat',
-      timestamp: now,
-      sessionId: session?.sessionId,
-      runId: session?.runId,
+      data: {
+        timestamp: now,
+        sessionId: session?.sessionId,
+        runId: session?.runId,
+      },
     };
 
     try {
@@ -444,8 +446,10 @@ export class SessionManager {
 
     const message = {
       type: 'reconnect',
-      run_id: runId,
-      last_event_id: lastEventId ?? 0,
+      data: {
+        run_id: runId,
+        last_event_id: lastEventId ?? 0,
+      },
     };
 
     websocket.send(JSON.stringify(message));
