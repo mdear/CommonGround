@@ -346,6 +346,60 @@ class TestGenerateContextBudgetDirective:
 
         assert "generate_message_summary" in result
 
+    def test_user_initiated_exceeded_returns_headroom_directive(self):
+        """User-initiated prompts past EXCEEDED get headroom warning, not emergency stop."""
+        result = generate_context_budget_directive(
+            ContextBudgetStatus.EXCEEDED,
+            {"utilization_percent": 90, "remaining_tokens": 100000},
+            agent_type="partner",
+            is_user_initiated=True
+        )
+
+        assert result is not None
+        assert "HEADROOM" in result
+        assert "EMERGENCY" not in result
+        # Should allow continuation, not demand immediate stop
+        assert "may continue" in result.lower() or "request" in result.lower()
+
+    def test_user_initiated_non_exceeded_uses_normal_directive(self):
+        """User-initiated flag only affects EXCEEDED status."""
+        result = generate_context_budget_directive(
+            ContextBudgetStatus.WARNING,
+            {"utilization_percent": 65, "remaining_tokens": 70000},
+            agent_type="partner",
+            is_user_initiated=True
+        )
+
+        # Should still be normal WARNING directive
+        assert result is not None
+        assert "WARNING" in result
+
+    def test_system_initiated_exceeded_returns_emergency_directive(self):
+        """Non-user-initiated EXCEEDED should return emergency stop directive."""
+        result = generate_context_budget_directive(
+            ContextBudgetStatus.EXCEEDED,
+            {"utilization_percent": 90, "remaining_tokens": 100000},
+            agent_type="partner",
+            is_user_initiated=False
+        )
+
+        assert result is not None
+        assert "EMERGENCY" in result or "EXCEEDED" in result
+
+    def test_user_initiated_works_for_all_agent_types(self):
+        """User-initiated headroom directive should work for any agent type."""
+        for agent_type in ["partner", "principal", "associate", None]:
+            result = generate_context_budget_directive(
+                ContextBudgetStatus.EXCEEDED,
+                {"utilization_percent": 95, "remaining_tokens": 50000},
+                agent_type=agent_type,
+                is_user_initiated=True
+            )
+
+            assert result is not None, f"Failed for agent_type={agent_type}"
+            assert "HEADROOM" in result, f"Missing HEADROOM for agent_type={agent_type}"
+            assert "EMERGENCY" not in result, f"Should not have EMERGENCY for user-initiated, agent_type={agent_type}"
+
 
 class TestContextBudgetStatusEnum:
     """Tests for the ContextBudgetStatus enum."""

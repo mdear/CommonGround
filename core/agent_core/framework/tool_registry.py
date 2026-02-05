@@ -54,7 +54,8 @@ def tool_registry(
     context_segment_contributions: Optional[List[Dict]] = None,
     default_knowledge_item_type: Optional[str] = None,
     source_uri_field_in_output: Optional[str] = None,
-    title_field_in_output: Optional[str] = None
+    title_field_in_output: Optional[str] = None,
+    allowed_at_critical: bool = False
 ):
     """
     A decorator to register a Node or Flow class as a tool callable by an LLM.
@@ -69,6 +70,9 @@ def tool_registry(
         default_knowledge_item_type: The default KB item type this tool produces.
         source_uri_field_in_output: Field in the output containing the source URI.
         title_field_in_output: Field in the output containing the title.
+        allowed_at_critical: If True, this tool remains available when context budget
+            is at CRITICAL or EXCEEDED threshold. Use for read-only tools that don't
+            expand context significantly (e.g., status queries).
     """
     def decorator(cls):
         from pocketflow import BaseNode
@@ -89,7 +93,8 @@ def tool_registry(
             "context_segment_contributions": context_segment_contributions or [],
             "default_knowledge_item_type": default_knowledge_item_type,
             "source_uri_field_in_output": source_uri_field_in_output,
-            "title_field_in_output": title_field_in_output
+            "title_field_in_output": title_field_in_output,
+            "allowed_at_critical": allowed_at_critical
         }
 
         if name in _TOOL_REGISTRY:

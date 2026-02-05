@@ -613,3 +613,102 @@ class TestToolRegistryIntegration:
         # Get node class
         node_class = get_tool_node_class("internal_search")
         assert node_class is InternalSearch
+
+
+class TestAllowedAtCritical:
+    """Tests for the allowed_at_critical tool registry parameter."""
+
+    def test_allowed_at_critical_defaults_to_false(self):
+        """Test that allowed_at_critical defaults to False."""
+        from pocketflow import BaseNode
+
+        @tool_registry(
+            name="default_tool",
+            description="A tool with default settings",
+            parameters={"type": "object", "properties": {}}
+        )
+        class DefaultTool(BaseNode):
+            pass
+
+        tool = _TOOL_REGISTRY["default_tool"]
+        assert tool.get("allowed_at_critical") is False
+
+    def test_allowed_at_critical_can_be_true(self):
+        """Test that allowed_at_critical can be set to True."""
+        from pocketflow import BaseNode
+
+        @tool_registry(
+            name="read_only_tool",
+            description="A read-only status tool",
+            parameters={"type": "object", "properties": {}},
+            allowed_at_critical=True
+        )
+        class ReadOnlyTool(BaseNode):
+            pass
+
+        tool = _TOOL_REGISTRY["read_only_tool"]
+        assert tool.get("allowed_at_critical") is True
+
+    def test_allowed_at_critical_can_be_false(self):
+        """Test that allowed_at_critical can be explicitly set to False."""
+        from pocketflow import BaseNode
+
+        @tool_registry(
+            name="write_tool",
+            description="A write tool",
+            parameters={"type": "object", "properties": {}},
+            allowed_at_critical=False
+        )
+        class WriteTool(BaseNode):
+            pass
+
+        tool = _TOOL_REGISTRY["write_tool"]
+        assert tool.get("allowed_at_critical") is False
+
+
+class TestFlowTerminatingToolsCriticalAccess:
+    """
+    Regression tests to ensure flow-terminating tools remain available at critical budget.
+    
+    These tools are essential for graceful shutdown and must have allowed_at_critical=True.
+    If these tests fail, agents will lose the ability to wrap up cleanly at budget limits.
+    """
+
+    def test_finish_flow_is_critical_safe(self):
+        """finish_flow must remain available at CRITICAL budget for Principal graceful shutdown."""
+        # Import to trigger registration (registry was cleared by fixture, re-register)
+        from agent_core.nodes.custom_nodes.finish_node import FinishNode
+        
+        # Re-check the class's _tool_info attribute (set by decorator)
+        assert hasattr(FinishNode, "_tool_info"), "FinishNode should have _tool_info from @tool_registry"
+        tool_info = FinishNode._tool_info
+        assert tool_info.get("allowed_at_critical") is True, (
+            "finish_flow must have allowed_at_critical=True for Principal graceful shutdown. "
+            "Without this, Principal cannot call finish_flow at CRITICAL/EXCEEDED budget."
+        )
+
+    def test_generate_message_summary_is_critical_safe(self):
+        """generate_message_summary must remain available at CRITICAL budget for Associate graceful shutdown."""
+        # Import to trigger registration
+        from agent_core.nodes.custom_nodes.finish_node import GenerateMessageSummaryTool
+        
+        # Check the class's _tool_info attribute
+        assert hasattr(GenerateMessageSummaryTool, "_tool_info"), "GenerateMessageSummaryTool should have _tool_info"
+        tool_info = GenerateMessageSummaryTool._tool_info
+        assert tool_info.get("allowed_at_critical") is True, (
+            "generate_message_summary must have allowed_at_critical=True for Associate graceful shutdown. "
+            "Without this, Associate cannot submit deliverables at CRITICAL/EXCEEDED budget."
+        )
+
+    def test_get_principal_status_is_critical_safe(self):
+        """GetPrincipalStatusSummaryTool must remain available for Partner monitoring at critical budget."""
+        # Import to trigger registration
+        from agent_core.nodes.custom_nodes.get_principal_status_tool import GetPrincipalStatusSummaryTool
+        
+        # Check the class's _tool_info attribute
+        assert hasattr(GetPrincipalStatusSummaryTool, "_tool_info"), "GetPrincipalStatusSummaryTool should have _tool_info"
+        tool_info = GetPrincipalStatusSummaryTool._tool_info
+        assert tool_info.get("allowed_at_critical") is True, (
+            "GetPrincipalStatusSummaryTool must have allowed_at_critical=True for Partner status monitoring. "
+            "Without this, Partner cannot check Principal status at CRITICAL/EXCEEDED budget."
+        )

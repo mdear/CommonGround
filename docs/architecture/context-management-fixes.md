@@ -24,8 +24,66 @@ This document addresses three issues discovered during live session analysis:
 ```python
 WARNING_THRESHOLD = 0.60   # 60% - Inject guidance to wrap up
 CRITICAL_THRESHOLD = 0.75  # 75% - Force completion (Principal/Associate only)
-EXCEEDED_THRESHOLD = 0.85  # 85% - Circuit breaker fires
+EXCEEDED_THRESHOLD = 0.85  # 85% - Circuit breaker fires (system messages only)
 ```
+
+### User Prompt Bypass (Circuit Breaker Exception)
+
+The guardian reserves 15% headroom above the EXCEEDED threshold. This headroom is specifically for **user-initiated messages**, allowing users to continue interacting with agents even after the guardian cap is reached.
+
+**Behavior:**
+- **System-generated messages** (observer events, tool results, etc.): Blocked at EXCEEDED threshold
+- **User-initiated messages**: Allowed through with informative warning, can use reserved headroom up to actual model context limit
+
+**User-initiated sources:**
+- `USER_PROMPT` - Direct user message to agent (e.g., user → Partner)
+- `PARTNER_DIRECTIVE` - User request relayed Partner → Principal (e.g., user asks Partner to check Principal status)
+- `PRINCIPAL_COMPLETED` - Principal's response returning to Partner after user-initiated research
+
+**Implementation:** `base_agent_node.py` detects user-initiated sources in the inbox processing log and bypasses the circuit breaker:
+```python
+USER_INITIATED_SOURCES = {"USER_PROMPT", "PARTNER_DIRECTIVE", "PRINCIPAL_COMPLETED"}
+is_user_initiated = any(
+    log_entry.get("source") in USER_INITIATED_SOURCES
+    for log_entry in processing_result.get("processing_log", [])
+)
+skip_llm_call = budget_status == ContextBudgetStatus.EXCEEDED and not is_user_initiated
+```
+
+### Tool Restriction at Critical Budget (Partner Agent)
+
+At CRITICAL and EXCEEDED thresholds, Partner agents have restricted tool access to preserve context headroom for wrap-up operations.
+
+**Design Rationale:**
+- External tools (web search, MCP servers) were used during planning phase
+- Write-oriented Principal tools would expand context significantly  
+- Only read-only tools should remain available to monitor status and prepare handoffs
+
+**Implementation:** Tools are tagged with `allowed_at_critical=True` in their registry definition:
+
+| Tool | `allowed_at_critical` | Reason |
+|------|----------------------|--------|
+| `GetPrincipalStatusSummaryTool` | ✅ True | Read-only status query |
+| `LaunchPrincipalExecutionTool` | ❌ False | Creates new Principal context |
+| `SendDirectiveToPrincipalTool` | ❌ False | Sends directives, expands context |
+| MCP Server tools | ❌ False | External calls, potentially large results |
+
+**Filtering Logic** (`agent_strategy_helpers.py`):
+```python
+def filter_tools_for_critical_budget(tools: List[Dict], agent_id: str) -> List[Dict]:
+    return [t for t in tools if t.get("allowed_at_critical", False)]
+
+def get_formatted_api_tools(agent_node_instance, context: Dict) -> List[Dict]:
+    applicable_tools = get_tools_for_profile(...)
+    budget_status = context.get("state", {}).get("_context_budget", {}).get("status", "HEALTHY")
+    
+    if budget_status in ("CRITICAL", "EXCEEDED"):
+        applicable_tools = filter_tools_for_critical_budget(applicable_tools, agent_id)
+    
+    return format_tools_for_llm_api(applicable_tools)
+```
+
+This applies to **all agent types** (Principal, Partner, Associate) - any agent that receives a user-initiated message will allow it through.
 
 ### What Does NOT Exist
 
@@ -41,8 +99,9 @@ EXCEEDED_THRESHOLD = 0.85  # 85% - Circuit breaker fires
 | **Fix 1: Tool Priority** | ✅ IMPLEMENTED | `base_agent_node.py::_resolve_tool_conflicts()` |
 | **Fix 2: Sync Completion** | ✅ IMPLEMENTED | `flow.py::_handle_principal_completion_sync()` |
 | **Fix 3: Turn Summarization** | ⏸️ DEFERRED | User prefers phase-based handoffs (by design) |
+| **Fix 4: User Prompt Bypass** | ✅ IMPLEMENTED | `base_agent_node.py`, `context_budget_guardian.py` |
 
-**Tests**: `test_tool_conflict_resolution.py` (10 tests), `test_deliverable_propagation.py` (27 tests)
+**Tests**: `test_tool_conflict_resolution.py` (10 tests), `test_deliverable_propagation.py` (27 tests), `test_context_budget_guardian.py` (41 tests)
 
 
 ---

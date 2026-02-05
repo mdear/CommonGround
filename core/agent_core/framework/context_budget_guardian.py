@@ -256,7 +256,8 @@ def assess_context_budget(
 def generate_context_budget_directive(
     status: ContextBudgetStatus,
     metadata: Dict,
-    agent_type: Optional[str] = None
+    agent_type: Optional[str] = None,
+    is_user_initiated: bool = False
 ) -> Optional[str]:
     """
     Generates a system directive to inject based on context budget status.
@@ -269,10 +270,16 @@ def generate_context_budget_directive(
     - Partner: Does NOT have `finish_flow` - advise to complete current response
     - Associate: Has `generate_message_summary` - direct to call it
 
+    Special case: User-initiated prompts past EXCEEDED threshold get a warning
+    directive instead of an emergency stop directive, since the user is allowed
+    to use the reserved headroom up to the actual model context limit.
+
     Args:
         status: The current ContextBudgetStatus
         metadata: Metadata from assess_context_budget
         agent_type: The agent type ("principal", "partner", "associate", etc.)
+        is_user_initiated: If True, this turn was triggered by a user prompt,
+                          which allows proceeding past EXCEEDED threshold
 
     Returns:
         A directive string to inject, or None if no injection needed
@@ -283,6 +290,11 @@ def generate_context_budget_directive(
     utilization = metadata.get("utilization_percent", 0)
     remaining = metadata.get("remaining_tokens", 0)
 
+    # Special handling for user-initiated prompts past guardian threshold
+    # The user is allowed to use headroom - provide informative warning only
+    if is_user_initiated and status == ContextBudgetStatus.EXCEEDED:
+        return _generate_user_headroom_directive(utilization, remaining, agent_type)
+
     # Agent-type-specific directives
     # Partner does NOT have finish_flow or generate_message_summary tools
     if agent_type == "partner":
@@ -292,6 +304,44 @@ def generate_context_budget_directive(
     else:
         # Associates have generate_message_summary
         return _generate_associate_directive(status, utilization, remaining)
+
+
+def _generate_user_headroom_directive(
+    utilization: float,
+    remaining: int,
+    agent_type: Optional[str] = None
+) -> str:
+    """
+    Generate directive for user-initiated prompts past the guardian threshold.
+    
+    The guardian cap reserves headroom specifically for user interactions.
+    When the user sends a message past the cap, we allow it through with
+    an informative warning rather than blocking.
+    
+    Args:
+        utilization: Current context utilization percentage (of guardian cap)
+        remaining: Remaining tokens (may be negative relative to guardian cap)
+        agent_type: The agent type for context
+    
+    Returns:
+        A warning directive that allows the agent to continue
+    """
+    return f"""
+⚠️ **CONTEXT HEADROOM IN USE** ⚠️
+
+You are now using the reserved context headroom (utilization: {utilization}% of guardian threshold).
+
+The user has sent a direct message which is always allowed through to you. The guardian threshold
+reserves this headroom specifically so you can respond to user requests.
+
+**Guidelines:**
+- Respond fully and helpfully to the user's request
+- Avoid generating excessively long responses if concise ones suffice
+- Be aware that context is limited, but do NOT refuse the user's request
+- If further conversation is needed, inform the user that context is running low
+
+You may continue with the user's request.
+"""
 
 
 def _generate_partner_directive(
@@ -738,13 +788,21 @@ class ContextBudgetGuardian:
 
         return status, metadata
 
-    def get_directive(self, status: ContextBudgetStatus, metadata: Dict) -> Optional[str]:
+    def get_directive(self, status: ContextBudgetStatus, metadata: Dict, is_user_initiated: bool = False) -> Optional[str]:
         """
         Gets the appropriate directive based on status and history.
 
         May adjust directive based on whether warnings have already been issued.
+        
+        Args:
+            status: The current ContextBudgetStatus
+            metadata: Metadata from assess_context_budget
+            is_user_initiated: If True, this turn was triggered by a user prompt,
+                              which allows proceeding past EXCEEDED threshold
         """
-        directive = generate_context_budget_directive(status, metadata, agent_type=self.agent_type)
+        directive = generate_context_budget_directive(
+            status, metadata, agent_type=self.agent_type, is_user_initiated=is_user_initiated
+        )
 
         # If we've already issued warnings but agent hasn't wrapped up, escalate language
         if directive and self.warnings_issued > 2 and status == ContextBudgetStatus.WARNING:

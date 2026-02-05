@@ -688,8 +688,22 @@ class AgentNode(AsyncNode):
 
             budget_status, budget_metadata = self.context_budget_guardian.record_turn(predicted_total_tokens)
 
-            # Get directive if budget is constrained
-            budget_directive = self.context_budget_guardian.get_directive(budget_status, budget_metadata)
+            # Detect if this turn was triggered by user intent
+            # User-initiated messages bypass the guardian cap (they can use reserved headroom)
+            # This includes:
+            # - USER_PROMPT: Direct user message to this agent
+            # - PARTNER_DIRECTIVE: User request relayed through Partner to Principal
+            # - PRINCIPAL_COMPLETED: Principal's response to user-initiated research (back to Partner)
+            USER_INITIATED_SOURCES = {"USER_PROMPT", "PARTNER_DIRECTIVE", "PRINCIPAL_COMPLETED"}
+            is_user_initiated = any(
+                log_entry.get("source") in USER_INITIATED_SOURCES
+                for log_entry in processing_result.get("processing_log", [])
+            )
+
+            # Get directive if budget is constrained (pass user context for appropriate messaging)
+            budget_directive = self.context_budget_guardian.get_directive(
+                budget_status, budget_metadata, is_user_initiated=is_user_initiated
+            )
 
             # Inject budget directive into system prompt if needed
             if budget_directive:
@@ -709,17 +723,32 @@ class AgentNode(AsyncNode):
             }
 
             # CIRCUIT BREAKER: If EXCEEDED, skip LLM call entirely
-            skip_llm_call = budget_status == ContextBudgetStatus.EXCEEDED
-            if skip_llm_call:
-                logger.warning(
-                    "context_budget_circuit_breaker_triggered",
-                    extra={
-                        "agent_id": self.agent_id,
-                        "status": budget_status.name,
-                        "utilization_percent": budget_metadata["utilization_percent"],
-                        "action": "skipping_llm_call_forcing_summarization"
-                    }
-                )
+            # EXCEPTION: User-initiated prompts ALWAYS proceed - the guardian cap is for
+            # internal agent-to-agent communication only. Users should be able to use the
+            # reserved headroom up to the actual model context limit.
+            skip_llm_call = budget_status == ContextBudgetStatus.EXCEEDED and not is_user_initiated
+            
+            if budget_status == ContextBudgetStatus.EXCEEDED:
+                if is_user_initiated:
+                    logger.warning(
+                        "context_budget_exceeded_user_prompt_allowed",
+                        extra={
+                            "agent_id": self.agent_id,
+                            "status": budget_status.name,
+                            "utilization_percent": budget_metadata["utilization_percent"],
+                            "action": "allowing_user_prompt_past_guardian_cap"
+                        }
+                    )
+                else:
+                    logger.warning(
+                        "context_budget_circuit_breaker_triggered",
+                        extra={
+                            "agent_id": self.agent_id,
+                            "status": budget_status.name,
+                            "utilization_percent": budget_metadata["utilization_percent"],
+                            "action": "skipping_llm_call_forcing_summarization"
+                        }
+                    )
             # ===============================================================
 
             api_tools_list = get_formatted_api_tools(self, context)

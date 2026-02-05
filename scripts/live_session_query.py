@@ -348,7 +348,8 @@ async def query_live_session(
     section: str = None,
     context_name: str = None,
     message_offset: int = 0,
-    message_limit: int = 50
+    message_limit: int = 50,
+    output_file: str = None
 ):
     """Query a live session's state via WebSocket with pagination support."""
     try:
@@ -423,7 +424,14 @@ async def query_live_session(
                     sys.exit(1)
                 
                 context = response.get("data", {}).get("context", {})
-                print_live_context(context, run_id, mode)
+                
+                # Output to file if specified, otherwise print
+                if output_file:
+                    with open(output_file, 'w') as f:
+                        json.dump(context, f, indent=2, default=str)
+                    print(f"\nSaved query results to: {output_file}")
+                else:
+                    print_live_context(context, run_id, mode)
             else:
                 print(f"Unexpected response type: {response.get('type')}")
                 print(json.dumps(response, indent=2)[:1000])
@@ -722,7 +730,7 @@ won't be found even if it was persisted to JSON.
     parser.add_argument("--reconstruct", action="store_true",
                        help="Reconstruct full state by pulling all pages")
     parser.add_argument("--output", "-o", 
-                       help="Output file for reconstructed state (default: <run_id>_live.json)")
+                       help="Output file for query results (JSON). Works with all modes.")
     parser.add_argument("--page-size", type=int, default=100,
                        help="Page size for message pagination during reconstruction (default: 100)")
     
@@ -750,7 +758,8 @@ won't be found even if it was persisted to JSON.
         section=args.section,
         context_name=args.context_name,
         message_offset=args.offset,
-        message_limit=args.limit
+        message_limit=args.limit,
+        output_file=args.output
     ))
 
 

@@ -135,20 +135,35 @@ The guardian supports 1M context detection and provides agent-type-aware handlin
    - CRITICAL: 75-85% - Force completion (for agents with flow-ending tools)
    - EXCEEDED: >85% - Circuit breaker fires, 15% remains for wrap-up
 
-3. **Agent-Type-Aware Behavior**:
+3. **User-Initiated Message Bypass**:
+   
+   The 15% headroom above EXCEEDED is reserved for **user-initiated messages**. When the user sends a message (directly or relayed through Partner), it bypasses the circuit breaker:
+   
+   | Source | Description | Bypasses Circuit Breaker |
+   |--------|-------------|--------------------------|
+   | `USER_PROMPT` | Direct user message to agent | ✅ Yes |
+   | `PARTNER_DIRECTIVE` | User request relayed Partner → Principal | ✅ Yes |
+   | `PRINCIPAL_COMPLETED` | Principal response back to Partner | ✅ Yes |
+   | `TOOL_RESULT` | Autonomous tool responses | ❌ No |
+   | Other sources | System-generated events | ❌ No |
+   
+   This ensures users can always interact with agents even when the guardian threshold is exceeded.
+
+4. **Agent-Type-Aware Behavior**:
 
    | Agent Type | WARNING | CRITICAL | EXCEEDED |
    |------------|---------|----------|----------|
    | **Principal** | Directive: "call `finish_flow`" | Forces `finish_flow` | Circuit breaker → `finish_flow` + synthesis |
-   | **Partner** | Directive: "wrap up response" | Guidance only (no forcing) | Circuit breaker → user message |
+   | **Partner** | Directive: "wrap up response" | Tools restricted to read-only | Circuit breaker → user message |
    | **Associate** | Directive: "call `generate_message_summary`" | Forces `generate_message_summary` | Circuit breaker → handback for Principal |
 
    **Key Design Insight**: Partner agents do NOT have `finish_flow` or `generate_message_summary` in their toolset, so:
    - They receive increasingly urgent guidance directives at WARNING/CRITICAL
-   - They CANNOT be forced to call a non-existent tool
-   - At EXCEEDED, they return a user-visible message explaining the limit was reached
+   - At CRITICAL/EXCEEDED, tool access is restricted to read-only tools (e.g., `GetPrincipalStatusSummaryTool`)
+   - Write tools (`LaunchPrincipalExecutionTool`, `SendDirectiveToPrincipalTool`, MCP tools) are filtered out
+   - This preserves headroom for wrap-up and handoff preparation
 
-4. **Handback Behavior** (Associates only):
+5. **Handback Behavior** (Associates only):
    - When an Associate hits EXCEEDED, it packages its collected work (KB tokens, tool history, partial findings) into a `ContextBudgetHandback` structure
    - This handback is stored in `deliverables._handback` for Principal to access
    - Principal can expand KB tokens and summarize the partial work itself

@@ -159,7 +159,8 @@ def _extract_deliverables_from_messages(
         },
         "required": ["current_associate_findings"]
     },
-    toolset_name="flow_control_summary"
+    toolset_name="flow_control_summary",
+    allowed_at_critical=True  # Flow-terminating tool needed for graceful shutdown
 )
 class GenerateMessageSummaryTool(BaseToolNode):
     """
@@ -253,7 +254,8 @@ This two-step process ensures your deliverable is properly captured. Example seq
         }
     }},
     ends_flow=True,
-    toolset_name="flow_control_end"
+    toolset_name="flow_control_end",
+    allowed_at_critical=True  # Flow-terminating tool needed for graceful shutdown
 )
 class FinishNode(AsyncNode):
     async def prep_async(self, shared: Dict) -> Dict:

@@ -47,8 +47,10 @@ Agent Filter (optional, narrows scope):
     --agent WM_1       - Focus on specific work module (e.g., WM_1, WM_2)
 
 Output Options:
-    --json      - Output as JSON instead of formatted text
-    --no-color  - Disable colored output
+    --json          - Output as JSON instead of formatted text
+    --no-color      - Disable colored output
+    --output FILE   - Save analysis output to a file instead of stdout
+                      (useful for large outputs that may overflow terminals)
 
 Examples:
     # Analyze persisted session (default)
@@ -58,6 +60,10 @@ Examples:
     # Analyze live session (real-time from server memory)
     python analyze_session.py dangerous-colorful-okapi --live
     python analyze_session.py dangerous-colorful-okapi --live --mode tokens
+    
+    # Save output to file (recommended for --mode all)
+    python analyze_session.py tentacled-pearl-oriole --mode all --output analysis.txt
+    python analyze_session.py tentacled-pearl-oriole --json --output analysis.json
     
     # Other examples
     python analyze_session.py tentacled-pearl-oriole --mode tokens
@@ -1638,6 +1644,8 @@ def main():
                        help="Disable colored output")
     parser.add_argument("--json", action="store_true",
                        help="Output as JSON instead of formatted text")
+    parser.add_argument("--output", "-o",
+                       help="Output file for analysis results. Redirects all output to the specified file.")
     
     # Live session options
     parser.add_argument("--live", action="store_true",
@@ -1693,73 +1701,85 @@ def main():
         print(f"{Colors.RED}Error analyzing session: {e}{Colors.RESET}")
         raise
 
-    # JSON output
-    if args.json:
-        output = {
-            "session_id": analysis.session_id,
-            "run_type": analysis.run_type,
-            "status": analysis.status,
-            "created_at": analysis.created_at,
-            "total_tokens": analysis.total_tokens,
-            "total_messages": analysis.total_messages,
-            "total_tool_calls": analysis.total_tool_calls,
-            "dispatch_count": analysis.dispatch_count,
-            "successful_dispatches": analysis.successful_dispatches,
-            "issues": analysis.issues,
-            "partner": {
-                "tokens": analysis.partner.tokens.estimated_tokens if analysis.partner else 0,
-                "status": analysis.partner.tokens.status if analysis.partner else "N/A",
-            } if analysis.partner else None,
-            "principal": {
-                "tokens": analysis.principal.tokens.estimated_tokens if analysis.principal else 0,
-                "status": analysis.principal.tokens.status if analysis.principal else "N/A",
-                "utilization_percent": analysis.principal.tokens.utilization_percent if analysis.principal else 0,
-            } if analysis.principal else None,
-            "work_modules": {
-                wm_id: {
-                    "agent_profile": wm.agent_profile,
-                    "status": wm.status,
-                    "dispatch_status": wm.dispatch_status,
-                    "tokens": wm.tokens.estimated_tokens,
-                    "messages": wm.message_count,
-                    "dispatch_count": wm.dispatch_count,
-                    "deliverables_count": wm.deliverables_count,
+    # Helper function to run the appropriate output
+    def generate_output():
+        # JSON output
+        if args.json:
+            output = {
+                "session_id": analysis.session_id,
+                "run_type": analysis.run_type,
+                "status": analysis.status,
+                "created_at": analysis.created_at,
+                "total_tokens": analysis.total_tokens,
+                "total_messages": analysis.total_messages,
+                "total_tool_calls": analysis.total_tool_calls,
+                "dispatch_count": analysis.dispatch_count,
+                "successful_dispatches": analysis.successful_dispatches,
+                "issues": analysis.issues,
+                "partner": {
+                    "tokens": analysis.partner.tokens.estimated_tokens if analysis.partner else 0,
+                    "status": analysis.partner.tokens.status if analysis.partner else "N/A",
+                } if analysis.partner else None,
+                "principal": {
+                    "tokens": analysis.principal.tokens.estimated_tokens if analysis.principal else 0,
+                    "status": analysis.principal.tokens.status if analysis.principal else "N/A",
+                    "utilization_percent": analysis.principal.tokens.utilization_percent if analysis.principal else 0,
+                } if analysis.principal else None,
+                "work_modules": {
+                    wm_id: {
+                        "agent_profile": wm.agent_profile,
+                        "status": wm.status,
+                        "dispatch_status": wm.dispatch_status,
+                        "tokens": wm.tokens.estimated_tokens,
+                        "messages": wm.message_count,
+                        "dispatch_count": wm.dispatch_count,
+                        "deliverables_count": wm.deliverables_count,
+                    }
+                    for wm_id, wm in analysis.work_modules.items()
                 }
-                for wm_id, wm in analysis.work_modules.items()
             }
-        }
-        print(json.dumps(output, indent=2))
-        return
+            print(json.dumps(output, indent=2))
+            return
 
-    # If agent filter specified, show agent-specific detail
-    if args.agent:
-        print_agent_detail(analysis, args.agent, session_path)
-        return
+        # If agent filter specified, show agent-specific detail
+        if args.agent:
+            print_agent_detail(analysis, args.agent, session_path)
+            return
 
-    # Mode-based output
-    if args.mode == "all":
-        print_detailed(analysis)  # includes summary
-        print_token_focus(analysis)
-        print_handoff_analysis(analysis, session_path)
-        print_thrashing_analysis(analysis, session_path)
-        print_errors(analysis, session_path)
-        print_timeline(analysis, session_path)
-    elif args.mode == "summary":
-        print_summary(analysis)
-    elif args.mode == "detailed":
-        print_detailed(analysis)
-    elif args.mode == "tokens":
-        print_token_focus(analysis)
-    elif args.mode == "handoff":
-        print_handoff_analysis(analysis, session_path)
-    elif args.mode == "thrashing":
-        print_thrashing_analysis(analysis, session_path)
-    elif args.mode == "timeline":
-        print_timeline(analysis, session_path)
-    elif args.mode == "errors":
-        print_errors(analysis, session_path)
+        # Mode-based output
+        if args.mode == "all":
+            print_detailed(analysis)  # includes summary
+            print_token_focus(analysis)
+            print_handoff_analysis(analysis, session_path)
+            print_thrashing_analysis(analysis, session_path)
+            print_errors(analysis, session_path)
+            print_timeline(analysis, session_path)
+        elif args.mode == "summary":
+            print_summary(analysis)
+        elif args.mode == "detailed":
+            print_detailed(analysis)
+        elif args.mode == "tokens":
+            print_token_focus(analysis)
+        elif args.mode == "handoff":
+            print_handoff_analysis(analysis, session_path)
+        elif args.mode == "thrashing":
+            print_thrashing_analysis(analysis, session_path)
+        elif args.mode == "timeline":
+            print_timeline(analysis, session_path)
+        elif args.mode == "errors":
+            print_errors(analysis, session_path)
+        else:
+            print_summary(analysis)
+
+    # Output to file or stdout
+    if args.output:
+        import contextlib
+        with open(args.output, 'w') as f:
+            with contextlib.redirect_stdout(f):
+                generate_output()
+        print(f"Analysis saved to: {args.output}")
     else:
-        print_summary(analysis)
+        generate_output()
 
 
 if __name__ == "__main__":

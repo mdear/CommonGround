@@ -15,7 +15,8 @@ ORPHANED_SESSION_THRESHOLD_MINUTES = 30  # If ALL modules are stale, session is 
     name="GetPrincipalStatusSummaryTool",
     description="Retrieves the current execution status summary and recent milestones of the Principal Agent. Use this to monitor progress.",
     parameters={"type": "object", "properties": {}}, # No parameters needed from LLM
-    toolset_name="monitoring_tools"
+    toolset_name="monitoring_tools",
+    allowed_at_critical=True  # Read-only tool, safe to use at critical budget levels
 )
 class GetPrincipalStatusSummaryTool(AsyncNode):
     """
